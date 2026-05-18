@@ -1,0 +1,25 @@
+# Data — large files stay out of git
+*.jsonl
+*.csv
+data/splits/
+
+# Model weights and adapters
+outputs/adapters/
+outputs/evals/
+outputs/submissions/
+*.safetensors
+*.bin
+*.pt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Conda/pip
+.conda/
+
+# OS
+.DS_Store

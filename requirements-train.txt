@@ -1,0 +1,10 @@
+# Training environment — separate from vllm (conflicting deps)
+# Install: pip install -r requirements-train.txt
+unsloth[cu124] @ git+https://github.com/unslothai/unsloth.git
+transformers>=4.48.3
+peft
+trl
+datasets
+safetensors
+pyyaml
+torch --index-url https://download.pytorch.org/whl/cu124

@@ -1,0 +1,4 @@
+# vLLM inference environment — separate conda env from training
+# Install: pip install -r requirements-vllm.txt
+vllm>=0.15.1
+openai
