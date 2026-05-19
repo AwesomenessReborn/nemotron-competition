@@ -1,0 +1,13 @@
+models:
+  - id: qwen3.5-plus
+    name: Qwen3.5 Plus
+    requests_per_5hr: 10200
+    priority: primary
+  - id: deepseek-v4-pro
+    name: DeepSeek V4 Pro
+    requests_per_5hr: 3450
+    priority: spot_check
+
+api:
+  base_url: https://opencode.ai/zen/go/v1
+  api_key_env: OPENCODE_API_KEY

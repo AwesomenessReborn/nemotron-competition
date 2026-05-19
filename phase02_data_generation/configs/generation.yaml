@@ -1,0 +1,14 @@
+teacher_model: qwen3.5-plus
+
+dataset:
+  source: shared/data/raw/train.csv
+  task_types_source: shared/data/raw/train_with_task_type.csv
+  train_split: 0.9
+  val_split: 0.1
+
+generation:
+  max_examples: 50000
+  batch_size: 10
+  temperature: 0.7
+  max_tokens: 2048
+  output_dir: phase02_data_generation/data
