@@ -1,140 +1,167 @@
 """
 Unsloth LoRA fine-tuning for Nemotron-H (Mamba-2 Transformer Hybrid).
 
-Architecture notes:
-- ~75% Mamba-2 SSM layers, ~25% standard attention (only 4 attention layers in 4B)
-- Flash Attention 2 is NOT supported — Mamba layers have no Q/K/V
-- LoRA must ONLY target attention/MLP projections, not Mamba SSM weights
-- trust_remote_code=True is mandatory
-- save_only_model=True avoids ~6GB optimizer state disk spikes per checkpoint
+ARCHITECTURE NOTES — read before modifying:
+- ~75% Mamba-2 SSM layers, ~25% standard attention (4 attention layers in 4B)
+- Flash Attention 2 NOT supported — Mamba layers have no Q/K/V
+- DO NOT set attn_implementation='flash_attention_2'
+- LoRA targets: attention + MLP projections only, NOT Mamba layer weights
+- trust_remote_code=True is MANDATORY
+- save_only_model=True prevents optimizer state disk explosion
 """
-
-import yaml, argparse, json, time
+import argparse
+import json
+import sys
+import time
 from pathlib import Path
+
+import yaml
 from datasets import Dataset
 from unsloth import FastLanguageModel
 from trl import SFTTrainer, SFTConfig
-from src.prompt_template import format_for_training
+
+sys.path.insert(0, str(Path(__file__).parent))
+from prompt_template import format_for_training
 
 
 def load_jsonl(path):
+    rows = []
     with open(path) as f:
-        return [json.loads(l) for l in f if l.strip()]
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
 
 
-def build_dataset(jsonl_path, tokenizer, max_seq_length):
+def build_dataset(jsonl_path, tokenizer):
     rows = load_jsonl(jsonl_path)
-    formatted = [format_for_training(r) for r in rows]
-
-    def apply_template(batch):
-        texts = []
-        for sys, usr, asst in zip(batch["system"], batch["user"], batch["assistant"]):
-            messages = [
-                {"role": "system", "content": sys},
-                {"role": "user", "content": usr},
-                {"role": "assistant", "content": asst},
-            ]
-            # enable_thinking=False: we supply the reasoning trace ourselves
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False,
-                enable_thinking=False,
-            )
-            texts.append(text)
-        return {"text": texts}
-
-    ds = Dataset.from_list(formatted)
-    ds = ds.map(apply_template, batched=True, remove_columns=["system", "user", "assistant"])
-    return ds
+    texts = []
+    for row in rows:
+        parts = format_for_training(row)
+        messages = [
+            {"role": "system",    "content": parts["system"]},
+            {"role": "user",      "content": parts["user"]},
+            {"role": "assistant", "content": parts["assistant"]},
+        ]
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+            enable_thinking=False,
+        )
+        texts.append({"text": text})
+    return Dataset.from_list(texts)
 
 
-def main(cfg_path, train_path, val_path):
-    with open(cfg_path) as f:
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--train", required=True)
+    parser.add_argument("--val",   required=True)
+    args = parser.parse_args()
+
+    with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    print(f"Loading model: {cfg['model_name']}")
+    print(f"\n{'='*60}")
+    print(f"Model:      {cfg['model_name']}")
+    print(f"Train data: {args.train}")
+    print(f"Val data:   {args.val}")
+    print(f"Output:     {cfg['output_dir']}")
+    print(f"{'='*60}\n")
+
+    # Load model
+    t0 = time.time()
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=cfg["model_name"],
         max_seq_length=cfg["max_seq_length"],
+        load_in_4bit=cfg["load_in_4bit"],
         dtype=None,
-        load_in_4bit=cfg.get("load_in_4bit", False),
         trust_remote_code=True,
-        # DO NOT set attn_implementation="flash_attention_2" —
-        # Mamba-2 layers have no Q/K/V, FA2 dispatch doesn't exist for them
+        # DO NOT pass attn_implementation — Mamba-2 layers don't support FA2
     )
+    print(f"Model loaded in {time.time() - t0:.1f}s\n")
 
-    # Nemotron-H has only 4 standard attention layers.
-    # q/k/v/o_proj target those; gate/up/down_proj target the MLP blocks.
-    # Mamba SSM weights (in_proj, out_proj, x_proj, dt_proj, etc.) are excluded.
-    target_modules = cfg.get("target_modules", [
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
-    ])
-
+    # Attach LoRA
     model = FastLanguageModel.get_peft_model(
         model,
         r=cfg["lora_rank"],
         lora_alpha=cfg["lora_alpha"],
-        lora_dropout=cfg.get("lora_dropout", 0.05),
-        target_modules=target_modules,
-        bias="none",
+        lora_dropout=cfg["lora_dropout"],
+        target_modules=cfg["target_modules"],
         use_gradient_checkpointing="unsloth",
+        bias="none",
         random_state=42,
     )
 
-    print(f"Building datasets from {train_path} and {val_path}")
-    train_ds = build_dataset(train_path, tokenizer, cfg["max_seq_length"])
-    val_ds = build_dataset(val_path, tokenizer, cfg["max_seq_length"])
-    print(f"Train: {len(train_ds)} | Val: {len(val_ds)}")
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total     = sum(p.numel() for p in model.parameters())
+    print(f"Trainable params: {trainable:,} / {total:,}  ({100*trainable/total:.2f}%)\n")
 
-    output_dir = Path(cfg["output_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Build datasets
+    train_ds = build_dataset(args.train, tokenizer)
+    val_ds   = build_dataset(args.val,   tokenizer)
+    print(f"Train samples: {len(train_ds)} | Val samples: {len(val_ds)}\n")
+
+    output_dir = cfg["output_dir"]
+    final_adapter_dir = str(Path(output_dir) / "final_adapter")
+
+    sft_cfg = SFTConfig(
+        output_dir=output_dir,
+        num_train_epochs=cfg["num_train_epochs"],
+        per_device_train_batch_size=cfg["per_device_train_batch_size"],
+        gradient_accumulation_steps=cfg["gradient_accumulation_steps"],
+        learning_rate=cfg["learning_rate"],
+        bf16=True,
+        eval_strategy="steps",
+        eval_steps=cfg["eval_steps"],
+        save_strategy="steps",
+        save_steps=cfg["save_steps"],
+        save_only_model=cfg["save_only_model"],
+        dataset_text_field="text",
+        max_seq_length=cfg["max_seq_length"],
+        report_to="none",
+        logging_steps=1,
+    )
 
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        args=SFTConfig(
-            output_dir=str(output_dir),
-            per_device_train_batch_size=cfg.get("per_device_train_batch_size", 1),
-            gradient_accumulation_steps=cfg.get("gradient_accumulation_steps", 4),
-            num_train_epochs=cfg.get("num_train_epochs", 1),
-            learning_rate=cfg.get("learning_rate", 2e-4),
-            bf16=True,
-            logging_steps=10,
-            eval_strategy="steps",
-            eval_steps=cfg.get("eval_steps", 50),
-            save_strategy="steps",
-            save_steps=cfg.get("save_steps", 100),
-            save_total_limit=2,
-            # save_only_model skips the ~6GB optimizer state per checkpoint.
-            # Without it, two checkpoints × 6GB = 12GB disk spike causes corruption
-            # (exact bug from professor's notebook at step 400).
-            # Trade-off: cannot resume training from saved checkpoints.
-            save_only_model=True,
-            max_seq_length=cfg["max_seq_length"],
-            dataset_text_field="text",
-            report_to="none",
-        ),
+        args=sft_cfg,
     )
 
-    print("Starting training...")
-    t0 = time.time()
+    print("Starting training...\n")
+    t_train = time.time()
     trainer.train()
-    print(f"Training complete in {(time.time() - t0) / 60:.1f} min")
+    elapsed = time.time() - t_train
+    print(f"\nTraining complete in {elapsed/60:.1f} min")
 
-    final_path = output_dir / "final_adapter"
-    model.save_pretrained(str(final_path))
-    tokenizer.save_pretrained(str(final_path))
-    print(f"Adapter saved to {final_path}")
+    # Save final adapter
+    Path(final_adapter_dir).mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(final_adapter_dir)
+    tokenizer.save_pretrained(final_adapter_dir)
+
+    # Verify outputs
+    print(f"\nChecking adapter files in {final_adapter_dir}:")
+    expected = ["adapter_config.json", "adapter_model.safetensors"]
+    all_ok = True
+    for fname in expected:
+        p = Path(final_adapter_dir) / fname
+        if p.exists():
+            print(f"  OK {fname}  ({p.stat().st_size / 1024:.0f} KB)")
+        else:
+            print(f"  MISSING {fname}")
+            all_ok = False
+
+    if all_ok:
+        print("\nSMOKE TRAINING PASSED — adapter saved successfully.")
+    else:
+        print("\nWARNING: some adapter files are missing.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--train", required=True)
-    parser.add_argument("--val", required=True)
-    args = parser.parse_args()
-    main(args.config, args.train, args.val)
+    main()

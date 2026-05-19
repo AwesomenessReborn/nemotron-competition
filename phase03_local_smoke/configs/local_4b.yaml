@@ -1,5 +1,5 @@
 model_name: nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16
-output_dir: outputs/adapters/local_4b
+output_dir: phase03_local_smoke/outputs/adapters/local_4b
 max_seq_length: 2048
 load_in_4bit: false
 lora_rank: 8
@@ -11,6 +11,7 @@ per_device_train_batch_size: 1
 gradient_accumulation_steps: 4
 eval_steps: 25
 save_steps: 50
+save_only_model: true
 target_modules:
   - q_proj
   - k_proj
