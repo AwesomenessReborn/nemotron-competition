@@ -7,7 +7,14 @@ models:
     name: DeepSeek V4 Pro
     requests_per_5hr: 3450
     priority: spot_check
+  - id: gemini-2.5-flash
+    name: Gemini 2.5 Flash
+    requests_per_minute: 1000
+    priority: primary_bulk
 
 api:
-  base_url: https://opencode.ai/zen/go/v1
-  api_key_env: OPENCODE_API_KEY
+  opencode:
+    base_url: https://opencode.ai/zen/go/v1
+    api_key_env: OPENCODE_API_KEY
+  gemini:
+    api_key_env: GEMINI_API_KEY

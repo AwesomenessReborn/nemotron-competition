@@ -1,0 +1,92 @@
+{
+  "per_task_accuracy": {
+    "bit_manipulation": {
+      "gemini-2.5-flash": {
+        "correct": 7,
+        "total": 9
+      },
+      "claude-haiku-4-5": {
+        "correct": 9,
+        "total": 9
+      }
+    },
+    "cipher_text": {
+      "gemini-2.5-flash": {
+        "correct": 8,
+        "total": 9
+      },
+      "claude-haiku-4-5": {
+        "correct": 9,
+        "total": 9
+      }
+    },
+    "gravity": {
+      "gemini-2.5-flash": {
+        "correct": 8,
+        "total": 8
+      },
+      "claude-haiku-4-5": {
+        "correct": 8,
+        "total": 8
+      }
+    },
+    "roman": {
+      "gemini-2.5-flash": {
+        "correct": 8,
+        "total": 8
+      },
+      "claude-haiku-4-5": {
+        "correct": 8,
+        "total": 8
+      }
+    },
+    "symbol_transform": {
+      "gemini-2.5-flash": {
+        "correct": 6,
+        "total": 8
+      },
+      "claude-haiku-4-5": {
+        "correct": 8,
+        "total": 8
+      }
+    },
+    "unit_conversion": {
+      "gemini-2.5-flash": {
+        "correct": 8,
+        "total": 8
+      },
+      "claude-haiku-4-5": {
+        "correct": 8,
+        "total": 8
+      }
+    }
+  },
+  "totals": {
+    "gemini-2.5-flash": {
+      "correct": 45,
+      "total": 50
+    },
+    "claude-haiku-4-5": {
+      "correct": 50,
+      "total": 50
+    }
+  },
+  "quality_metrics": {
+    "gemini-2.5-flash": {
+      "match_rate": 0.9,
+      "parse_rate": 0.9,
+      "avg_words": 78.04,
+      "avg_time": 1.3026
+    },
+    "claude-haiku-4-5": {
+      "match_rate": 1.0,
+      "parse_rate": 1.0,
+      "avg_words": 64.5,
+      "avg_time": 2.1266
+    }
+  },
+  "recommendation": {
+    "winner": "claude-haiku-4-5",
+    "reason": "highest answer match rate (100.0% vs 90.0% for gemini-2.5-flash)"
+  }
+}
