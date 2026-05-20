@@ -14,67 +14,139 @@ teachers     dataset     test (4B)    train (30B)
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| Phase 01 — Teacher Benchmark | ✅ Complete | Gemini 2.5 Flash + Claude Haiku 4.5 both passed ≥90% gate |
+| Phase 01 — Teacher Benchmark | ✅ Complete | Gemini 2.5 Flash selected as primary teacher |
 | Phase 02 — Data Generation | ✅ Complete | 9,500 rows generated; train=8,550 / val=950 |
 | Phase 03 — Local Smoke Test (4B) | ✅ Complete | LoRA adapter trained; eval loss 6.50 → 1.44 (78% reduction) |
 | Phase 04 — Cloud Training (30B) | ⏳ Pending | Requires GPU VM with ≥80 GB VRAM — see below |
 
 ---
 
-## Phase 03 — LoRA Adapter (4B, local)
+## Phase 01 — Teacher Benchmark (`phase01_teacher_benchmark/`)
 
-A validated LoRA adapter for `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16` is saved at:
+**Goal:** Find the best teacher model to generate reasoning traces before spending API quota on the full 9,500-row dataset.
 
-```
-phase03_local_smoke/outputs/adapters/local_4b/final_adapter/
-```
+**Models evaluated:**
+- `gemini-2.5-flash` (Google) — with `thinking_budget=0` (mandatory; extended thinking costs ~10x more per sample)
+- `claude-haiku-4-5` (Anthropic)
 
-**Training details:**
+Both models were run on a 50-sample stratified smoke test covering all task types (bit manipulation, cipher text, gravity/physics, roman numerals, unit conversion, etc.).
 
-| Parameter | Value |
-|-----------|-------|
-| Base model | `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16` |
-| LoRA rank | 8 |
-| LoRA alpha | 16 |
-| Target modules | q/k/v/o/gate/up/down proj |
-| Training rows | 8,550 |
+**Results:**
+
+| Model | Parse success | Answer match |
+|-------|--------------|-------------|
+| Gemini 2.5 Flash | ≥ 90% | ≥ 90% |
+| Claude Haiku 4.5 | ≥ 90% | ≥ 90% |
+
+Both passed the ≥90% gate. **Gemini 2.5 Flash was selected as the primary teacher** for full generation due to its stronger structured reasoning output format. Haiku was kept as a backup and used to generate a parallel v7 dataset for comparison/merge.
+
+---
+
+## Phase 02 — Data Generation (`phase02_data_generation/`)
+
+**Goal:** Generate reasoning traces for all 9,500 competition rows using the selected teacher model.
+
+**Process:**
+1. Ran `generate_full_gemini.py` — streamed all 9,500 rows through Gemini 2.5 Flash, producing `train_reasoning_v7_haiku.jsonl` (v7 dataset)
+2. Merged with the professor's existing `train_reasoning_v6.jsonl` dataset — deduplication by row ID with v7 taking priority
+3. Result: complete overlap (all v6 IDs existed in v7), so the final merged dataset is 9,500 v7 rows
+
+**Dataset split:**
+
+| Split | Rows | Path |
+|-------|------|------|
+| Train | 8,550 | `phase02_data_generation/data/merged/train.jsonl` |
+| Val | 950 | `phase02_data_generation/data/merged/val.jsonl` |
+| Smoke (stratified) | 50 | `phase02_data_generation/data/merged/smoke_50.jsonl` |
+
+**Training objective note:** Each row is formatted as *problem + gold answer → reasoning explanation*. The model learns to explain why the gold answer is correct, not to solve from scratch. This is intentional — the competition provides the problem, and the model needs to produce high-quality reasoning traces.
+
+---
+
+## Phase 03 — Local Smoke Test (`phase03_local_smoke/`)
+
+**Goal:** Validate the full training pipeline end-to-end on the 4B model before spending cloud GPU time on the 30B.
+
+**Model:** `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16`
+
+**Key architectural notes discovered during this phase:**
+- Nemotron-H is a hybrid architecture: ~75% Mamba-2 SSM layers + ~25% standard attention layers
+- No Flash Attention 2 support — uses xformers or falls back to standard attention
+- Requires `trust_remote_code=True`
+- `mamba-ssm` must be compiled from source on CUDA 13.0 (RTX 5070 Ti / Blackwell GPUs — no prebuilt wheels exist yet)
+- `transformers 5.5.0` has a known incompatibility with Nemotron-H's `HybridMambaAttentionDynamicCache` during generation — eval used loss-based validation as a workaround
+
+**Training results:**
+
+| Metric | Value |
+|--------|-------|
 | Steps | 1,100 |
-| Eval loss (start → end) | 6.50 → 1.44 (78% reduction) |
+| Eval loss (start) | 6.50 |
+| Eval loss (end) | 1.44 |
+| Reduction | 78% |
 | Hardware | RTX 5070 Ti (16 GB VRAM) |
+| Training rows | 8,550 |
+
+**LoRA adapter saved at:** `phase03_local_smoke/outputs/adapters/local_4b/final_adapter/`
+
+| LoRA Parameter | Value |
+|----------------|-------|
+| Base model | `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16` |
+| Rank (r) | 8 |
+| Alpha | 16 |
+| Dropout | 0.05 |
+| Target modules | q/k/v/o/gate/up/down proj |
+| Bias | none |
+
+**Pipeline validated:** model loads, LoRA attaches, training runs, loss decreases, adapter saves and reloads cleanly. Training script (`phase03_local_smoke/src/train_lora.py`) is the same script used for Phase 04 — only the config changes.
 
 ---
 
-## Next Step — Phase 04: Cloud Training on 30B Model
+## Phase 04 — Cloud Training (`phase04_cloud_train/`)
 
-The 30B MoE model (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`) requires a GPU with **≥80 GB VRAM** (A100 80 GB or H100 recommended). All deployment scripts are ready.
+**Goal:** Full training run on the 30B MoE model to produce the final competition submission adapter.
 
-**See [`phase04_cloud_train/DEPLOY.md`](phase04_cloud_train/DEPLOY.md) for the full step-by-step guide.**
+**Model:** `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`
+- 30B total parameters, ~3B active per token (mixture-of-experts)
+- BF16 weights = ~60 GB; peak VRAM with gradient checkpointing ≈ 70–75 GB
+- **Requires a GPU with ≥80 GB VRAM** (A100 80 GB or H100 80 GB)
 
-Quick summary:
-1. Rent a GPU VM (Lambda Labs / RunPod / Vast.ai — H100 or A100 80 GB)
-2. Clone this repo on the VM
-3. `bash phase04_cloud_train/setup.sh` — installs conda env, PyTorch, unsloth, mamba-ssm (~20 min)
-4. Upload `train.jsonl` and `val.jsonl` via scp
-5. `bash phase04_cloud_train/run_training.sh` — runs preflight checks then training (~3–7 hours)
-6. Download the final adapter from `phase04_cloud_train/outputs/adapters/cloud_30b/final_adapter/`
+**Status: All deployment scripts are ready — waiting on GPU provisioning.**
 
-**Estimated cost:** $6–$20 depending on provider and GPU.
+See [`phase04_cloud_train/DEPLOY.md`](phase04_cloud_train/DEPLOY.md) for the full step-by-step guide.
 
----
+**Quick start:**
+```bash
+# 1. Provision: Ubuntu 22.04, CUDA 12.x, ≥80 GB VRAM, ≥100 GB disk
+# 2. Clone repo and run setup (~20 min, compiles mamba-ssm from source)
+bash phase04_cloud_train/setup.sh
 
-## Phase Descriptions
+# 3. Log in to HuggingFace and accept model license
+conda run -n nemotron-train huggingface-cli login
 
-### Phase 01 — Teacher Benchmark (`phase01_teacher_benchmark/`)
-Compare candidate teacher models on a held-out slice. Pick the best one before spending API quota on full generation.
+# 4. Upload training data via scp from local machine
+scp phase02_data_generation/data/merged/train.jsonl user@VM_IP:~/nemotron-competition/phase02_data_generation/data/merged/
+scp phase02_data_generation/data/merged/val.jsonl   user@VM_IP:~/nemotron-competition/phase02_data_generation/data/merged/
 
-### Phase 02 — Data Generation (`phase02_data_generation/`)
-Stream all training examples through the winning teacher models. Validate, clean, and split into train/val JSONL files.
+# 5. Run training (preflight checks run automatically)
+bash phase04_cloud_train/run_training.sh
+```
 
-### Phase 03 — Local Smoke Test (`phase03_local_smoke/`)
-Train a LoRA adapter on the 4B model locally. Fast iteration to validate the training script, data format, and eval harness before touching cloud GPUs.
+**30B LoRA config:**
 
-### Phase 04 — Cloud Training (`phase04_cloud_train/`)
-Full training run on the 30B MoE model. Same training script as Phase 03, different config. Produces the final submission adapter.
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| LoRA rank | 32 | Higher than 4B run — more model capacity |
+| LoRA alpha | 64 | 2× rank |
+| Learning rate | 0.0001 | Lower than 4B run — larger model = smaller LR |
+| Gradient accumulation | 8 | Effective batch size = 8 |
+| Max seq length | 2048 | |
+| `save_only_model` | true | Skips optimizer state — saves ~30 GB per checkpoint |
+| `load_in_4bit` | false | Set true if <80 GB VRAM (slight quality loss) |
+
+**Recommended providers:** Lambda Labs, RunPod, Vast.ai, CoreWeave
+**Estimated training time:** 3–5 hours on H100, 5–7 hours on A100
+**Estimated cost:** $6–$20
 
 ---
 
