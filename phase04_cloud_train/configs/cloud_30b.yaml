@@ -1,16 +1,17 @@
 model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-output_dir: outputs/adapters/cloud_30b
+output_dir: phase04_cloud_train/outputs/adapters/cloud_30b
 max_seq_length: 2048
 load_in_4bit: false
 lora_rank: 32
-lora_alpha: 32
+lora_alpha: 64
 lora_dropout: 0.05
-learning_rate: 0.0002
+learning_rate: 0.0001
 num_train_epochs: 1
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 4
+gradient_accumulation_steps: 8
 eval_steps: 100
-save_steps: 100
+save_steps: 200
+save_only_model: true
 target_modules:
   - q_proj
   - k_proj
