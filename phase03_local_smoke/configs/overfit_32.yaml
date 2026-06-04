@@ -1,0 +1,12 @@
+# 32-sample overfit sanity test for V2 pipeline
+# Goal: verify label masking + Mamba targets produce coherent \boxed{} output
+# Run with: python train_lora_v2.py + CLI flags (see Makefile / README)
+n_train: 32
+n_val: 32
+epochs: 30
+batch: 1
+accum: 4
+rank: 32
+lr: 2.0e-4
+max_seq: 2048
+output: phase03_local_smoke/outputs/adapters/debug_overfit_adapter
