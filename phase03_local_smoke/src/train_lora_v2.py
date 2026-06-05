@@ -330,13 +330,17 @@ def build_prompt(tokenizer, row):
 # Post-training generation evaluation
 # ---------------------------------------------------------------------------
 
-def eval_generations(model, tokenizer, rows, label, n_show=5, max_new=300):
+def eval_generations(model, tokenizer, rows, label, n_show=5, max_new=250):
+    from collections import defaultdict
     sep = "=" * 64
     print(f"\n{sep}\n  GENERATION EVAL — {label}\n{sep}")
     model.eval()
 
     n_boxed, n_correct = 0, 0
-    show_count = 0
+    task_boxed   = defaultdict(int)
+    task_correct = defaultdict(int)
+    task_total   = defaultdict(int)
+    show_count   = 0
     for row in rows:
         prompt = build_prompt(tokenizer, row)
         ids    = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
@@ -347,14 +351,18 @@ def eval_generations(model, tokenizer, rows, label, n_show=5, max_new=300):
         ext     = boxed[-1].strip() if boxed else ""
         gold    = str(row.get("gold_answer", row.get("answer", ""))).strip()
         correct = ext.strip().lower() == gold.strip().lower() if ext else False
+        task    = row.get("task_type", "unknown")
 
         if boxed:
             n_boxed += 1
+            task_boxed[task] += 1
         if correct:
             n_correct += 1
+            task_correct[task] += 1
+        task_total[task] += 1
 
         if show_count < n_show:
-            print(f"\n  id={str(row.get('id','?'))[:8]}  task={row.get('task_type','?')}")
+            print(f"\n  id={str(row.get('id','?'))[:8]}  task={task}")
             print(f"  gold:      {gold!r}")
             print(f"  raw_gen:   {gen[:250]!r}")
             print(f"  extracted: {ext!r}   boxed={bool(boxed)}   correct={correct}")
@@ -362,6 +370,11 @@ def eval_generations(model, tokenizer, rows, label, n_show=5, max_new=300):
 
     n = len(rows)
     print(f"\n  SUMMARY: boxed={n_boxed}/{n}  correct={n_correct}/{n}")
+    print(f"  Per-task accuracy:")
+    for t in sorted(task_total):
+        nt = task_total[t]
+        print(f"    {t:<20} boxed={task_boxed[t]}/{nt}  correct={task_correct[t]}/{nt} "
+              f"({100*task_correct[t]/nt:.0f}%)")
     return n_boxed, n_correct
 
 
@@ -563,7 +576,28 @@ def main():
                 accum_loss = 0.0
 
         avg = epoch_loss / max(1, epoch_steps)
-        print(f"  ── epoch {epoch+1} avg assistant-only loss: {avg*args.accum:.4f}\n")
+
+        # Val loss on up to 200 rows — forward pass only, no generation.
+        model.eval()
+        val_loader_ep = DataLoader(val_ds, batch_size=args.batch, shuffle=False,
+                                   collate_fn=manual_collate, drop_last=False)
+        val_loss_sum, val_loss_n = 0.0, 0
+        with torch.no_grad():
+            for vb in val_loader_ep:
+                vids  = vb["input_ids"].to(device)
+                vlbl  = vb["labels"].to(device)
+                vattn = vb["attention_mask"].to(device)
+                with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                    vout = model(input_ids=vids, labels=vlbl, attention_mask=vattn,
+                                 use_cache=False, return_dict=True)
+                val_loss_sum += vout.loss.item()
+                val_loss_n   += 1
+                if val_loss_n >= 200:
+                    break
+        model.train()
+        avg_val = val_loss_sum / max(1, val_loss_n)
+        print(f"  ── epoch {epoch+1}  train_loss={avg*args.accum:.4f}  "
+              f"val_loss={avg_val:.4f}  (val sample={val_loss_n})\n")
 
     print(f"\nTraining complete in {(time.time()-t_train)/60:.1f} min")
 

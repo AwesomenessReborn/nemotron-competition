@@ -11,6 +11,7 @@ outputs/submissions/
 *.safetensors
 *.bin
 *.pt
+*.pth
 
 # Python
 __pycache__/
@@ -28,6 +29,7 @@ __pycache__/
 
 # Env
 .env
+.env.*
 
 # Unsloth compiled cache
 unsloth_compiled_cache/
