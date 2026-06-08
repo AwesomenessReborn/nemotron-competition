@@ -1,91 +1,100 @@
-# Handoff — 2026-06-04T19:00:00
+# Handoff — 2026-06-08T21:38:00Z
 
 ## Mode
 Repo (git-grounded)
 
 ## Goal
-Maximize accuracy across 6 puzzle task types (bit_manipulation, gravity, unit_conversion, cipher_text, roman, symbol_transform) on the Kaggle Nemotron-H 4B LoRA competition. Phase 03 full-dataset training (`full_haiku_9500`) is done and evaluated. Next phase is V8 solver generation and/or DeepSeek pilot to attack the 0%-accuracy tasks.
+Generate all 9,500 V8 post-hoc rationale training rows for the Kaggle Nemotron competition using local Gemma 4 12B via llama.cpp raw `/completion`. The JSONL output (train + val split) becomes the dataset for NemotronH 4B LoRA fine-tuning. Phase 2 is not complete until all 9,500 rows are generated, validated (parse_success=True AND answer_correct=True or deterministic repair applied), and the final report is reviewed by the user.
 
-## full_haiku_9500 Baseline (current best adapter)
-
-**Adapter:** `phase03_local_smoke/outputs/adapters/full_haiku_9500/final_adapter_haiku_reasoning`
-**Eval file:** `phase03_local_smoke/outputs/evals/eval_final_adapter_haiku_reasoning_20260604_124340.json`
-**Config:** 9,500 rows, haiku_reasoning target, rank 32, 5 epochs, max_new=250, chunked generation (use_cache=False)
-
-| Metric | Value |
-|---|---|
-| Overall parse (boxed%) | **86.3%** (88/102 samples) |
-| Overall accuracy | **19.6%** (20/102 samples) |
-
-| Task | Parse% | Accuracy% | Notes |
-|---|---|---|---|
-| roman | 100% | **100%** | Solved — all 17/17 correct |
-| cipher_text | 94.1% | **17.6%** | Partial — 3/17 correct; truncation failures |
-| bit_manipulation | 64.7% | **0%** | Fails to infer rule; generates plausible-but-wrong patterns |
-| gravity | 100% | **0%** | Reasoning step correct but arithmetic off; off-by-small-amount |
-| symbol_transform | 58.8% | **0%** | Rule induction fails; often extracts partial output |
-| unit_conversion | 100% | **0%** | Identifies wrong multiplier; answer close but not exact |
-
-### Main Failure Modes
-1. **Arithmetic precision (gravity, unit_conversion):** Model infers the correct formula structure but uses an approximate multiplier. Off-by-1–3% on final value — exact string match fails. Requires solver-augmented traces or higher numerical precision training.
-2. **Rule induction failures (bit_manipulation, symbol_transform):** Generates a plausible transformation hypothesis that fits some examples but not the query. No symbolic/exact reasoning.
-3. **Output truncation (cipher_text):** Parse rate 94% but 82% of incorrect are empty-boxed (generation cuts off mid-sentence before `\boxed{}`). Low parse + truncation = context exhausted at max_new=250.
+## Current Status
+**Waiting for user to approve the full 9,500-row run.** A 20-row workers=8 smoke test passed (20/20 GOOD, 0 failures, 0 truncations, VRAM flat at 9,306 MB / 16,303 MB, 1.71 rows/s → ~1.55h projected). The server was reconfigured to `--parallel 8` (8 slots × n_ctx=512). Staging/train/val files from the 20-row test are present in `data/v8/` and **must be deleted** before the full run to prevent the resume logic from skipping the first 20 rows. The full generation script `generate_v8_local_gemma.py` is written, tested, and ready.
 
 ## Repo State
-- **Directory:** /home/hareee234/Dev/kaggle/nemotron-competition-may/nemotron-competition
-- **Branch:** main
+- **Directory:** `/home/hareee234/Dev/kaggle/nemotron-competition-may/nemotron-competition`
+- **Branch:** `feat/v8-data-generation`
+- **Git status:**
+  ```
+  M HANDOFF.md
+  M phase02_data_generation/src/generate_llm.py
+  ?? phase02_data_generation/src/bench_concurrency.py
+  ?? phase02_data_generation/src/generate_v8_local_gemma.py
+  ?? phase02_data_generation/src/local_gemma_completion_pilot.py
+  ?? phase02_data_generation/src/local_gemma_pilot.py
+  ?? phase02_data_generation/src/pilot_fireworks_100.py
+  ?? phase02_data_generation/src/prompt_repair_pilot.py
+  ?? phase02_data_generation/src/recovery_1024.py
+  ?? phase02_data_generation/src/smoke_test_fireworks.py
+  ?? phase02_data_generation/data/v8/*.json  (reports — gitignored)
+  ```
 - **Recent commits:**
   ```
-  59c1b29 feat: add placeholder submission.zip for initial Kaggle submission (no-op 30B adapter)
+  78fbc82 chore: pre-V8 repo cleanup, conventions, and experiment records
+  e47bbd9 feat: add V2 training variants and fix chunked generation for NemotronH
+  a879ab4 docs: add screenshot proof of initial Kaggle submission (pending)
+  59c1b29 feat: add placeholder submission.zip for initial Kaggle submission
   4160982 feat: add placeholder adapter generator for initial Kaggle submission
-  00ff561 docs: expand README with detailed per-phase findings, adapter specs, and cloud training guide
-  ae3c099 docs: update README with phase progress, 4B adapter details, and Phase 04 next steps
-  009b672 feat: phase04 cloud training deployment scripts for 30B Nemotron
   ```
-- **New/modified files (pending commit):**
-  - `phase03_local_smoke/src/train_lora_v2.py` (modified) — V2 training script with `--target-type`, chunked generation, BOX_RE fix
-  - `phase03_local_smoke/src/eval_chunked_full.py` (untracked) — full eval script used to generate the baseline above
-  - `phase02_data_generation/src/generate_llm.py` (untracked) — LLM generation helpers
-  - `run_variant_experiments.sh`, `run_chunked_eval.sh` — orchestration scripts
-  - `phase03_local_smoke/src/compare_lora_before_after_v2.py` (moved from root)
-  - `notebooks/nvidia-nemotron-my-train.ipynb` (moved from root)
+- **Changed files:**
+  - `HANDOFF.md` — updated this session
+  - `phase02_data_generation/src/generate_llm.py` — added `fireworks` and `local_openai` providers, switched system prompt to A++ post-hoc variant, updated `parse_response()` to return dict with gold comparison, `max_tokens` bumped 512→1024
+  - New scripts (untracked): `generate_v8_local_gemma.py` (primary), `local_gemma_completion_pilot.py` (gate/sym-repair), `bench_concurrency.py` (benchmark)
+- **Tests / build / lint:** not checked
 
 ## Key Decisions
 | Decision | Rationale | Alternatives Rejected |
 |---|---|---|
-| Switch to chunked generation (use_cache=False) | selective_state_update (cached Mamba SSM) diverges from training path → degenerate outputs for all adapters | KV cache patch (Bug 1 fix), accepting cached generation |
-| haiku_reasoning on full 9,500 rows | answer_only gives 0% on all numerical tasks; reasoning traces required to compute answers | answer_only, short_reasoning, new Gemini traces |
-| Do not use short_reasoning | Truncated first-sentence targets degenerate even with chunked inference | short_reasoning as fallback |
-| Dataset is 9,500 rows (not 69,029) | Embedded newlines; pandas reads 9,500 actual rows | None — factual correction |
-| Haiku data is complete | JSONL covers all 9,500 rows at 99.9% correctness | Resuming Haiku generation |
-| BOX_RE matches \box{} and \boxed{} | After 3 epochs, model skips 'ed' token; liberal regex avoids false negatives | Strict \boxed{} only |
+| Local Gemma 4 12B via raw `/completion` as primary provider | 100% parse, 96% copy on 100-row gate, $0 cost, avg 106 tok/row | Fireworks DeepSeek V4 Flash (90% good at max_tokens=1024, $7.28/9500 rows, persistent cipher/sym/unit failures) |
+| Raw `/completion`, NOT `/v1/chat/completions` | llama.cpp `reasoning_format=none` strips all Gemma 4 output via chat endpoint; raw endpoint returns full token stream | `/v1/chat/completions` (100% empty content every row) |
+| Deterministic symbol repair for symbol_transform copy failures | Model confuses puzzle-solving with copying on short special-char answers; deterministic copy of gold with fixed reasoning string keeps 100% usable rows | Sentinel prompt variants (tried `<ANSWER>` and `<<ANSWER>>` — both caused `<` tag-bleed into JSON values and 3 regressions vs general prompt) |
+| workers=8 for full generation | 20-row test: 1.71 rows/s, VRAM flat, 0 failures. ~1.55h projected for 9,500 rows | workers=4 (1.56 rows/s, same quality, ~1.7h) |
+| 95/5 train/val split, stratified by task_type | Maximizes training data; ensures all 6 task types appear in val | 90/10 split |
 
 ## Constraints and Preferences
-- Only Attn+MLP LoRA is trainable: Mamba in_proj/out_proj excluded (FP32/BF16 kernel mismatch)
-- 0.507% trainable params at rank 32 (4 attn layers × 4 modules + 17 MLP layers × 2 modules = 50 linear)
-- Manual training loop required (bypasses unsloth Trainer which strips -100 labels)
-- Adapter save/load: must call `_fix_adapter_key_names()` after save, then `load_adapter_weights()` after reload
-- RTX 5070 Ti (16GB VRAM) — BF16, no 4-bit, batch=1 + accum=4
-- Chunked generation is O(n²) per step — slow but correct; cached generation is broken
+- **Do NOT start full generation** without explicit user approval each session
+- **Do NOT train LoRA** after generation — user must review dataset first
+- **Do NOT commit** `.jsonl`, `.json` data files, `.csv` files, or `.claude/` directory
+- **Do NOT use `/v1/chat/completions`** for local Gemma — raw `/completion` only
+- **Do NOT use the sentinel symbol prompt** — causes tag-bleed regressions
+- **workers=8 is approved** — user changed server to `--parallel 8` this session
+- **Cost hard stop: $10** (moot for local run; applies if Fireworks used as fallback)
+- **No modification** of `repair_pilot_30.csv`, `rejected_v8_pool.csv`, or v7 haiku outputs
+- llama.cpp server must be running at `http://127.0.0.1:8080` before generation
 
 ## Do Not Do
-- Do not use `selective_state_update` (cached) generation — always degenerates
-- Do not train `short_reasoning` variant
-- Do not train `answer_only` for numerical tasks
-- Do not generate new Haiku/Gemini traces — 9,500 rows at 99.9% quality
-- Do not use `model.generate()` — broken for NemotronH (KV cache bug)
-- Do not call `_patch_hybrid_cache` / `_patch_block_forward` before chunked generation
+- Do NOT run `generate_v8_local_gemma.py` without first deleting the 20-row test staging files (listed in Next Action)
+- Do NOT use `generate_llm.py` for the local Gemma run — it uses `/v1/chat/completions`
+- Do NOT retry content failures (parse/copy) — one attempt per row; symbol_transform copy fails get deterministic repair; everything else goes to failures log
+- Do NOT merge/train LoRA automatically after generation completes
+- Do NOT push commits without explicit user instruction
 
 ## Open Questions / Risks
-- gravity/unit_conversion fail due to arithmetic precision — can V8 solver traces fix this?
-- bit_manipulation/symbol_transform need rule-induction reasoning — more examples or different trace format?
-- cipher_text truncation — increase max_new or reformat to put answer earlier?
-- Chunked generation O(n²): competition inference time at full context not measured
+- **20-row test staging files exist** — `local_gemma_staging.jsonl` (20 rows) and `train_reasoning_v8_local_gemma.jsonl` (20 rows) will cause resume logic to skip first 20 rows if not deleted before full run
+- **n_ctx=512 per slot** — server now has 8 slots × 512 = 4096 total KV cache. Test showed `stopped_limit=False` on all rows including long gravity rows; gravity outputs compressed from ~487 to ~309 tokens but all correct. Watch for edge cases on very long gravity/unit prompts in the full run
+- **symbol_transform failure rate** — gate showed 4/12 (33%) copy failures; all go to deterministic repair. Expect ~500 repair rows out of ~1,555 symbol_transform total. This is by design
+- **Server must be running** — not verified at handoff time; confirm with `curl http://127.0.0.1:8080/health` before starting
 
 ## Next Action
-Design and generate V8 solver traces to address the 0%-accuracy tasks. Key questions:
-1. For gravity/unit_conversion: generate traces that solve via exact arithmetic (no approximation)
-2. For bit_manipulation/symbol_transform: generate traces that enumerate pattern candidates systematically
-3. For cipher_text: consider shorter traces or answer-first format to avoid truncation
+Delete the 20-row test artifacts, confirm server is up, then start the full generation:
 
-Data target: `phase02_data_generation/data/v8/` / `phase02_data_generation/outputs/v8/`
+```bash
+# 1. Delete test artifacts (prevents resume logic skipping first 20 rows)
+rm phase02_data_generation/data/v8/local_gemma_staging.jsonl \
+   phase02_data_generation/data/v8/train_reasoning_v8_local_gemma.jsonl \
+   phase02_data_generation/data/v8/val_reasoning_v8_local_gemma.jsonl \
+   phase02_data_generation/data/v8/local_gemma_full_report.json
+
+# 2. Confirm server
+curl -s http://127.0.0.1:8080/health
+
+# 3. Full run (~1.55h, logs to file)
+nohup /home/hareee234/miniconda3/envs/nemotron-train/bin/python3 \
+  phase02_data_generation/src/generate_v8_local_gemma.py \
+  --workers 8 --n-predict 512 --val-frac 0.05 \
+  > /tmp/v8_generation.log 2>&1 &
+echo "PID: $!"
+
+# 4. Monitor (progress printed every 250 rows)
+tail -f /tmp/v8_generation.log | grep -E "PROGRESS|FAIL|REPAIR|COMPLETE"
+```
+
+Expected: ~9,000+ model-accepted rows + ~500 symbol repairs → final `train_reasoning_v8_local_gemma.jsonl` and `val_reasoning_v8_local_gemma.jsonl` in `phase02_data_generation/data/v8/`. Stop and review `local_gemma_full_report.json` before LoRA training.
