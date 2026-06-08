@@ -2,17 +2,17 @@
 """
 Phase 2 LLM reasoning-trace generation — unified multi-provider script.
 
-Providers: deepseek, gemini, openrouter, mock
+Providers: fireworks, deepseek, gemini, openrouter, mock
 
 Workflow:
   # 1. Inspect payloads (no API calls)
-  python -m src.generate_llm --provider deepseek --dry-run
+  python -m src.generate_llm --provider fireworks --dry-run
 
   # 2. Pilot: 100 rows, quality gate, then stop
-  python -m src.generate_llm --provider deepseek --max-rows 100
+  python -m src.generate_llm --provider fireworks --max-rows 100
 
   # 3. Full run (after reviewing pilot output)
-  python -m src.generate_llm --provider deepseek
+  python -m src.generate_llm --provider fireworks
 
 Keys read from .env or shell environment — never hardcoded, never committed.
 """
@@ -39,6 +39,14 @@ PILOT_N = 100
 PILOT_GATE = 0.95
 
 PROVIDERS = {
+    "fireworks": {
+        "env_key": "FIREWORKS_API_KEY",
+        "base_url": "https://api.fireworks.ai/inference/v1",
+        "default_model": "accounts/fireworks/models/deepseek-v4-flash",
+        "cost_in": None,                # check https://fireworks.ai/pricing
+        "cost_out": None,
+        "default_workers": 10,
+    },
     "deepseek": {
         "env_key": "DEEPSEEK_API_KEY",
         "base_url": "https://api.deepseek.com/v1",
@@ -71,20 +79,37 @@ PROVIDERS = {
         "cost_out": 0.0,
         "default_workers": 50,
     },
+    "local_openai": {
+        # OpenAI-compatible local server (e.g. llama.cpp --server).
+        # Base URL: LOCAL_OPENAI_BASE_URL env var (default: http://127.0.0.1:8080/v1)
+        # Model:    LOCAL_OPENAI_MODEL env var   (default: model alias reported by server)
+        # API key:  LOCAL_OPENAI_API_KEY env var (default: "dummy" — server ignores it)
+        "env_key": "LOCAL_OPENAI_API_KEY",
+        "base_url": "http://127.0.0.1:8080/v1",
+        "default_model": "unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL",
+        "cost_in": 0.0,
+        "cost_out": 0.0,
+        "default_workers": 1,
+    },
 }
 
-SYSTEM_PROMPT = """You are given a problem and its correct answer.
-Write a concise explanation of WHY the answer is correct.
+# Prompt variant A++ — post-hoc rationale, JSON output, explicit quote-escape examples.
+# Validated: 96.7% parse / 96.7% copy on 30 hard rows (bit, cipher, sym, unit).
+SYSTEM_PROMPT = r"""You will receive a problem and its CORRECT_ANSWER.
+Your ONLY job is to output a JSON object — nothing else.
 
-You MUST respond in this exact format:
+Rules (violating any fails the task):
+1. Do NOT re-solve, re-derive, re-verify, or re-compute anything.
+2. "answer" MUST be the CORRECT_ANSWER value copied exactly, character-for-character.
+   If CORRECT_ANSWER contains a double-quote ("), escape it as \" in the JSON string.
+   If CORRECT_ANSWER contains a backslash (\), escape it as \\ in the JSON string.
+   Example: CORRECT_ANSWER is %">  →  "answer": "%\">"
+   Example: CORRECT_ANSWER is "|%<  →  "answer": "\"|%<"
+   Example: CORRECT_ANSWER is \([#  →  "answer": "\\([#"
+3. "reasoning" MUST be ≤60 words. State the rule/method used; confirm the answer fits. No math.
 
-REASONING: <concise explanation, 2-5 sentences max>
-ANSWER: <copy the given answer exactly>
-
-Rules:
-- Keep reasoning SHORT and direct — explain the pattern/rule used, not every step
-- Do not re-derive or verify the answer — just explain it
-- Copy the answer field exactly as given, no changes
+Output exactly this JSON (no markdown fences, no extra text):
+{"reasoning": "The rule [state it briefly]. Applying it to the input yields the given answer.", "answer": "CORRECT_ANSWER_HERE"}
 """
 
 TASK_SHORT = {
@@ -100,12 +125,49 @@ TASK_SHORT = {
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def parse_response(text):
-    reasoning_match = re.search(r"REASONING:\s*(.*?)(?=ANSWER:|$)", text, re.DOTALL)
-    answer_match = re.search(r"ANSWER:\s*(.+?)(?:\n|$)", text)
-    if reasoning_match and answer_match:
-        return reasoning_match.group(1).strip(), answer_match.group(1).strip(), True
-    return text.strip(), "PARSE_ERROR", False
+def parse_response(text, gold, task_type):
+    """Parse JSON response; compare extracted answer against gold.
+
+    Primary path: json.loads() on stripped text.
+    Greedy fallback: re.search for unescaped-quote cases where json.loads fails.
+
+    Returns dict with keys: parsed_ok, answer, answer_matches_gold, reasoning, raw.
+    """
+    raw = text
+    stripped = text.strip()
+    stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+    stripped = re.sub(r"\s*```$", "", stripped)
+    stripped = stripped.strip()
+
+    reasoning = ""
+    answer = "PARSE_ERROR"
+    parsed_ok = False
+
+    try:
+        obj = json.loads(stripped)
+        answer = str(obj.get("answer", "")).strip()
+        reasoning = str(obj.get("reasoning", "")).strip()
+        if answer:
+            parsed_ok = True
+    except json.JSONDecodeError:
+        pass
+
+    if not parsed_ok:
+        # Greedy fallback: recover answer when model emits unescaped " in the value
+        m = re.search(r'"answer"\s*:\s*"(.*)"', stripped, re.DOTALL)
+        if m:
+            answer = m.group(1)
+            parsed_ok = True
+
+    matches_gold = answer_correct(answer, gold, task_type) if parsed_ok else False
+
+    return {
+        "parsed_ok": parsed_ok,
+        "answer": answer,
+        "answer_matches_gold": matches_gold,
+        "reasoning": reasoning,
+        "raw": raw,
+    }
 
 
 def answer_correct(pred, gold, task_type):
@@ -122,11 +184,7 @@ def answer_correct(pred, gold, task_type):
 
 
 def user_content(row):
-    return (
-        f"Problem:\n{row['prompt']}\n\n"
-        f"Correct answer: {row['answer']}\n\n"
-        f"Explain concisely why this is correct."
-    )
+    return f"CORRECT_ANSWER: {row['answer']}\n\n{row['prompt']}"
 
 # ---------------------------------------------------------------------------
 # Provider setup
@@ -136,6 +194,10 @@ def check_api_key(provider):
     cfg = PROVIDERS[provider]
     env_key = cfg["env_key"]
     if env_key and not os.environ.get(env_key):
+        if provider == "local_openai":
+            # Local server doesn't require a real key — use placeholder.
+            os.environ[env_key] = "dummy"
+            return
         raise SystemExit(
             f"\nERROR: {env_key} is not set.\n"
             f"  Add it to .env or export it in your shell.\n"
@@ -147,11 +209,14 @@ def build_client(provider, model_id):
     """Return a client_state dict appropriate for the provider."""
     cfg = PROVIDERS[provider]
 
-    if provider in ("deepseek", "openrouter"):
+    if provider in ("fireworks", "deepseek", "openrouter", "local_openai"):
         from openai import OpenAI
+        base_url = cfg["base_url"]
+        if provider == "local_openai":
+            base_url = os.environ.get("LOCAL_OPENAI_BASE_URL", base_url)
         kwargs = {
-            "api_key": os.environ[cfg["env_key"]],
-            "base_url": cfg["base_url"],
+            "api_key": os.environ.get(cfg["env_key"]) or "dummy",
+            "base_url": base_url,
         }
         if provider == "openrouter":
             kwargs["default_headers"] = {
@@ -166,7 +231,7 @@ def build_client(provider, model_id):
         g_cfg = types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             temperature=0.0,
-            max_output_tokens=600,
+            max_output_tokens=512,
             thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
         return {"client": g_client, "config": g_cfg, "model": model_id}
@@ -181,14 +246,14 @@ def build_client(provider, model_id):
 # ---------------------------------------------------------------------------
 
 def make_caller(provider, model_id, client_state):
-    if provider in ("deepseek", "openrouter"):
+    if provider in ("fireworks", "deepseek", "openrouter", "local_openai"):
         client = client_state["client"]
 
         def call(row):
             t0 = time.time()
             resp = client.chat.completions.create(
                 model=model_id,
-                max_tokens=600,
+                max_tokens=1024,
                 temperature=0.0,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
@@ -222,7 +287,7 @@ def make_caller(provider, model_id, client_state):
             time.sleep(0.005)
             answer = str(row["answer"])
             reasoning = f"The {row['task_type']} problem yields {answer} by the standard rule."
-            raw = f"REASONING: {reasoning}\nANSWER: {answer}"
+            raw = json.dumps({"reasoning": reasoning, "answer": answer})
             return raw, 120, 40, 0.005
 
     else:
@@ -242,10 +307,10 @@ def dry_run(df, provider, model_id, output_path):
     for i, (_, row) in enumerate(rows.iterrows(), 1):
         print(f"--- Example {i}  id={row['id']}  task={row['task_type']} ---")
 
-        if provider in ("deepseek", "openrouter"):
+        if provider in ("fireworks", "deepseek", "openrouter", "local_openai"):
             payload = {
                 "model": model_id,
-                "max_tokens": 600,
+                "max_tokens": 1024,
                 "temperature": 0.0,
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT.strip()},
@@ -258,7 +323,7 @@ def dry_run(df, provider, model_id, output_path):
                 "contents": user_content(row),
                 "system_instruction": SYSTEM_PROMPT.strip(),
                 "temperature": 0.0,
-                "max_output_tokens": 600,
+                "max_output_tokens": 512,
                 "thinking_budget": 0,
             }
         elif provider == "mock":
@@ -274,46 +339,21 @@ def dry_run(df, provider, model_id, output_path):
 # ---------------------------------------------------------------------------
 
 def process_row(row, call_fn, model_id, output_path, write_lock, counters, counter_lock):
-    for attempt in range(3):
+    MAX_PARSE_ATTEMPTS = 3
+    last_result = None
+    total_tokens_in = 0
+    total_tokens_out = 0
+
+    for attempt in range(MAX_PARSE_ATTEMPTS):
+        if attempt > 0:
+            print(
+                f"  [RETRY {attempt}/{MAX_PARSE_ATTEMPTS-1}] "
+                f"row_id={row['id']} task={row['task_type']}",
+                flush=True,
+            )
+
         try:
             raw, tokens_in, tokens_out, gen_time = call_fn(row)
-            reasoning, answer, parse_ok = parse_response(raw)
-            correct = answer_correct(answer, str(row["answer"]), row["task_type"])
-
-            result = {
-                "id": row["id"],
-                "prompt": row["prompt"],
-                "reasoning": reasoning,
-                "answer": answer,
-                "task_type": row["task_type"],
-                "gold_answer": str(row["answer"]),
-                "model": model_id,
-                "gen_time": gen_time,
-                "parse_success": parse_ok,
-                "answer_correct": correct,
-                "tokens_in": tokens_in,
-                "tokens_out": tokens_out,
-            }
-
-            with write_lock:
-                with open(output_path, "a") as f:
-                    f.write(json.dumps(result) + "\n")
-
-            with counter_lock:
-                counters["done"] += 1
-                counters["tokens_in"] += tokens_in
-                counters["tokens_out"] += tokens_out
-                tt = row["task_type"]
-                counters["by_task"][tt]["done"] += 1
-                if parse_ok:
-                    counters["by_task"][tt]["parse_ok"] += 1
-                if correct:
-                    counters["by_task"][tt]["correct"] += 1
-                counters["gen_times"].append(gen_time)
-                _maybe_log(counters)
-
-            return result
-
         except Exception as e:
             err = str(e)
             if any(k in err.lower() for k in ("429", "rate", "quota", "overloaded")):
@@ -321,54 +361,111 @@ def process_row(row, call_fn, model_id, output_path, write_lock, counters, count
                 print(f"  [{row['id']}] Rate limited, waiting {wait}s...", flush=True)
                 time.sleep(wait)
             else:
-                print(f"  [{row['id']}] Error attempt {attempt+1}: {e}", flush=True)
+                print(f"  [{row['id']}] API error attempt {attempt+1}: {e}", flush=True)
                 time.sleep(5)
+            continue
 
-    # All retries failed
-    error_result = {
-        "id": row["id"],
-        "prompt": row["prompt"],
-        "reasoning": "GENERATION_FAILED",
-        "answer": "ERROR",
-        "task_type": row["task_type"],
-        "gold_answer": str(row["answer"]),
-        "model": model_id,
-        "gen_time": -1,
-        "parse_success": False,
-        "answer_correct": False,
-        "tokens_in": 0,
-        "tokens_out": 0,
-    }
+        total_tokens_in  += tokens_in
+        total_tokens_out += tokens_out
+        parsed = parse_response(raw, str(row["answer"]), row["task_type"])
+
+        last_result = {
+            "id":           row["id"],
+            "prompt":       row["prompt"],
+            "reasoning":    parsed["reasoning"],
+            "answer":       parsed["answer"],
+            "task_type":    row["task_type"],
+            "gold_answer":  str(row["answer"]),
+            "model":        model_id,
+            "gen_time":     gen_time,
+            "parse_success":  parsed["parsed_ok"],
+            "answer_correct": parsed["answer_matches_gold"],
+            "tokens_in":    total_tokens_in,
+            "tokens_out":   total_tokens_out,
+        }
+
+        if parsed["parsed_ok"]:
+            break  # good parse — no further retries needed
+
+        # Parse failed; loop continues to next attempt if any remain
+
+    # All attempts raised exceptions and no result was ever built
+    if last_result is None:
+        last_result = {
+            "id":           row["id"],
+            "prompt":       row["prompt"],
+            "reasoning":    "GENERATION_FAILED",
+            "answer":       "ERROR",
+            "task_type":    row["task_type"],
+            "gold_answer":  str(row["answer"]),
+            "model":        model_id,
+            "gen_time":     -1,
+            "parse_success":  False,
+            "answer_correct": False,
+            "tokens_in":    total_tokens_in,
+            "tokens_out":   total_tokens_out,
+        }
+
     with write_lock:
         with open(output_path, "a") as f:
-            f.write(json.dumps(error_result) + "\n")
+            f.write(json.dumps(last_result) + "\n")
+
     with counter_lock:
         counters["done"] += 1
-        counters["errors"] += 1
-    return error_result
+        row_num = counters["done"]
+        counters["tokens_in"]  += last_result["tokens_in"]
+        counters["tokens_out"] += last_result["tokens_out"]
+        if last_result["reasoning"] == "GENERATION_FAILED":
+            counters["errors"] += 1
+        tt = last_result["task_type"]
+        counters["by_task"][tt]["done"] += 1
+        if last_result["parse_success"]:
+            counters["by_task"][tt]["parse_ok"] += 1
+        if last_result["answer_correct"]:
+            counters["by_task"][tt]["correct"] += 1
+            counters["good"] += 1
+        else:
+            counters["bad"] += 1
+        counters["gen_times"].append(last_result["gen_time"])
+        _log_row(counters, row_num, row["task_type"],
+                 {"parsed_ok": last_result["parse_success"],
+                  "answer_matches_gold": last_result["answer_correct"]})
+        if row_num % 100 == 0:
+            _log_task_table(counters)
+
+    return last_result
 
 
-def _maybe_log(counters):
-    done = counters["done"]
-    if done % 100 != 0:
-        return
+def _log_row(counters, row_num, task_type, parsed):
     total = counters["total"]
-    recent = counters["gen_times"][-100:]
-    avg_t = sum(recent) / len(recent)
-    eta_s = (total - done) * avg_t / max(counters["max_workers"], 1)
-    task_summary = " ".join(
-        f"{TASK_SHORT.get(tt, tt)}:{int(100*v['parse_ok']/v['done'])}%"
-        for tt, v in sorted(counters["by_task"].items())
-        if v["done"] > 0
-    )
-    c_in = counters["tokens_in"] * counters["cost_in"]
-    c_out = counters["tokens_out"] * counters["cost_out"]
-    cost_str = f"${c_in+c_out:.4f}" if counters["cost_known"] else "cost=n/a"
+    if parsed["parsed_ok"] and parsed["answer_matches_gold"]:
+        status = "good"
+    elif not parsed["parsed_ok"]:
+        status = "parse_fail"
+    else:
+        status = "copy_fail"
+    good = counters["good"]
+    bad  = counters["bad"]
     print(
-        f"[{done:04d}/{total}] {task_summary} | avg {avg_t:.1f}s | "
-        f"est {eta_s/60:.0f}min | {cost_str}",
+        f"[{row_num}/{total}] task={TASK_SHORT.get(task_type, task_type):<6}  "
+        f"status={status:<12}  running: good={good} bad={bad}",
         flush=True,
     )
+
+
+def _log_task_table(counters):
+    done_total = counters["done"]
+    print(f"\n  --- Per-task breakdown at {done_total} rows ---")
+    print(f"  {'Task':<22} {'good':>6} {'parse_fail':>11} {'copy_fail':>10} {'total':>6}")
+    for tt, v in sorted(counters["by_task"].items()):
+        d = v["done"]
+        if d == 0:
+            continue
+        good_n     = v["correct"]
+        parse_fail = d - v["parse_ok"]
+        copy_fail  = v["parse_ok"] - v["correct"]
+        print(f"  {tt:<22} {good_n:>6} {parse_fail:>11} {copy_fail:>10} {d:>6}")
+    print()
 
 
 def run_batch(rows, call_fn, model_id, output_path, max_workers, counters, write_lock, counter_lock):
@@ -434,22 +531,63 @@ def print_gate_report(results, label):
 
 
 def print_final_summary(counters, elapsed, cfg):
-    c_in = counters["tokens_in"] * counters["cost_in"]
+    n     = counters["done"]
+    good  = counters["good"]
+    bad   = counters["bad"]
+    rate  = good / n if n else 0
+    c_in  = counters["tokens_in"] * counters["cost_in"]
     c_out = counters["tokens_out"] * counters["cost_out"]
+    total_cost = c_in + c_out
+
     print(f"\n{'='*60}")
-    print(f"COMPLETE")
-    print(f"  Rows this run:  {counters['done']}")
-    print(f"  Errors:         {counters['errors']}")
-    print(f"  Time:           {elapsed/60:.1f} min")
-    print(f"  Tokens in/out:  {counters['tokens_in']:,} / {counters['tokens_out']:,}")
+    print(f"FINAL SUMMARY")
+    print(f"  Rows processed:       {n}")
+    print(f"  Good (parse+copy OK): {good}/{n}  ({rate:.1%})")
+    print(f"  Bad:                  {bad}/{n}  ({1-rate:.1%})")
+    print(f"  Errors (API failure): {counters['errors']}")
+    print(f"  Time:                 {elapsed/60:.1f} min")
+    print(f"  Tokens in/out:        {counters['tokens_in']:,} / {counters['tokens_out']:,}")
+
     if counters["cost_known"]:
-        print(f"  Est. cost:      ${c_in+c_out:.4f}")
+        cost_per_row = total_cost / n if n else 0
+        proj_9500 = cost_per_row * 9500
+        print(f"  Est. cost this run:   ${total_cost:.4f}")
+        print(f"  Est. cost/row:        ${cost_per_row:.5f}")
+        print(f"  Projected 9,500 rows: ${proj_9500:.2f}")
     else:
-        print(f"  Est. cost:      n/a (pricing varies by OpenRouter model)")
-    print(f"\nParse / match per task type:")
+        # Fireworks estimates: $0.22/M in, $0.88/M out
+        est_in    = counters["tokens_in"]  * 0.22 / 1_000_000
+        est_out   = counters["tokens_out"] * 0.88 / 1_000_000
+        est_total = est_in + est_out
+        est_per_row = est_total / n if n else 0
+        print(f"  Est. cost (Fireworks $0.22/$0.88 per M): ${est_total:.4f}")
+        print(f"  Est. cost/row:        ${est_per_row:.5f}")
+        print(f"  Projected 9,500 rows: ${est_per_row * 9500:.2f}")
+        print(f"  (Verify rates at https://fireworks.ai/pricing)")
+
+    print(f"\n  Per-task breakdown:")
+    print(f"  {'Task':<22} {'good':>6} {'parse_fail':>11} {'copy_fail':>10} {'total':>6} {'bad%':>6}")
+    flagged = []
     for tt, v in sorted(counters["by_task"].items()):
-        if v["done"] > 0:
-            print(f"  {tt:<22} parse={v['parse_ok']}/{v['done']}  match={v['correct']}/{v['done']}")
+        d = v["done"]
+        if d == 0:
+            continue
+        good_n     = v["correct"]
+        parse_fail = d - v["parse_ok"]
+        copy_fail  = v["parse_ok"] - v["correct"]
+        bad_n      = d - good_n
+        bad_pct    = bad_n / d
+        flag = " <-- WARNING >10%" if bad_pct > 0.10 else ""
+        print(f"  {tt:<22} {good_n:>6} {parse_fail:>11} {copy_fail:>10} {d:>6} {bad_pct:>5.0%}{flag}")
+        if bad_pct > 0.10:
+            flagged.append((tt, bad_pct))
+
+    if flagged:
+        print(f"\n  WARNING — task types with >10% bad rate:")
+        for tt, pct in flagged:
+            print(f"    {tt}: {pct:.0%}")
+
+    print("=" * 60)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -464,15 +602,19 @@ def main():
         epilog="""
 examples:
   # Inspect payloads without API calls
-  python -m src.generate_llm --provider deepseek --dry-run
+  python -m src.generate_llm --provider fireworks --dry-run
 
   # Pilot: 100 rows (required before bulk)
-  python -m src.generate_llm --provider deepseek --max-rows 100
+  python -m src.generate_llm --provider fireworks --max-rows 100
 
   # Full run after reviewing pilot
-  python -m src.generate_llm --provider deepseek
+  python -m src.generate_llm --provider fireworks
 
-  # Mock provider (no API key needed)
+  # Different provider or model
+  python -m src.generate_llm --provider gemini --max-rows 100
+  python -m src.generate_llm --provider fireworks --model accounts/fireworks/models/deepseek-r1
+
+  # Mock provider (no API key needed, for testing)
   python -m src.generate_llm --provider mock --max-rows 20
 """,
     )
@@ -514,7 +656,10 @@ examples:
     cfg = PROVIDERS[provider]
 
     if args.model is None:
-        args.model = cfg["default_model"]
+        if provider == "local_openai":
+            args.model = os.environ.get("LOCAL_OPENAI_MODEL", cfg["default_model"])
+        else:
+            args.model = cfg["default_model"]
     if args.output is None:
         args.output = f"phase02_data_generation/data/train_reasoning_v7_{provider}.jsonl"
     max_workers = args.workers or cfg["default_workers"]
@@ -591,6 +736,8 @@ examples:
     counters = {
         "done": 0,
         "errors": 0,
+        "good": 0,
+        "bad": 0,
         "total": total_remaining,
         "tokens_in": 0,
         "tokens_out": 0,
