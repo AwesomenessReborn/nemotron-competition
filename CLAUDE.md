@@ -46,3 +46,16 @@ Do not use `model.generate()` — broken for NemotronH due to KV cache bug.
 ## Experiment records
 
 Every experiment that produces an eval result must write a short record under `docs/experiments/`. Name it `NNN_<slug>.md` (zero-padded three-digit index). Minimum fields: adapter path, dataset path, training settings, eval command, parse%, accuracy%, per-task breakdown, and path to the raw eval JSON.
+
+## Google Drive / rclone backup rules
+
+- **Use `rclone copy`, never `rclone sync`**, unless explicitly approved for a specific operation. `sync` deletes files on the destination that are absent locally — this can silently destroy Drive-only data.
+- **No deletes, moves, or purges on Drive** without explicit approval.
+- Canonical dataset path: `gdrive-hareee234:data/kaggle/nemotron/`
+- Canonical run artifact path: `gdrive-hareee234:runs/kaggle/nemotron/`
+- Frozen legacy archive (do not sync to): `gdrive-hareee234:backups/dev/kaggle/`
+- Run backups with: `./scripts/backup_nemotron_to_drive.sh`
+- Dry-run first: `DRY_RUN=1 ./scripts/backup_nemotron_to_drive.sh`
+- Verify with: `./scripts/check_nemotron_drive_backup.sh`
+- For training: copy datasets to local NVMe first; do not train directly from the GVFS mount (`/run/user/1000/gvfs/...`) — it is unreliable under sustained I/O.
+- See `docs/google_drive_backup.md` for the full canonical structure and rationale.
