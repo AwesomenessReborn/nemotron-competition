@@ -2,6 +2,8 @@
 *.jsonl
 *.csv
 data/splits/
+phase02_data_generation/data/**/*.json
+phase02_data_generation/data/**/*.md
 
 # Model weights and adapters
 outputs/adapters/
@@ -26,6 +28,9 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# Claude Code session directory
+.claude/
 
 # Env
 .env
