@@ -67,9 +67,8 @@ phase02_data_generation/data/
 
 Rules:
 - Never overwrite `merged/` in place. When a new dataset version is ready, copy it to `merged/` and tag the commit with the version name.
-- Version numbers (`v7`, `v8`, etc.) track schema or generation strategy changes, not minor fixes.
-- `v7` = haiku_reasoning traces, full 9,500 rows, 99.9% correctness (current production).
-- `v8` = solver-augmented traces targeting 0%-accuracy tasks (in progress).
+- Version numbers (`v7`, `v8`, etc.) track teacher model or generation strategy changes, not minor fixes. Minor fixes within a version append `.1`, `.2`, etc. (e.g. `v8.1`).
+- See `docs/dataset_versions.md` for the full version changelog — what each version changed, why, and what went wrong.
 - Each version directory should contain a `README.md` or a `docs/experiments/` record explaining provenance.
 
 ## Experiment output naming
