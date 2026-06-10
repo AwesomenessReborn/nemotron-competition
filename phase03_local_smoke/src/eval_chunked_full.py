@@ -39,6 +39,22 @@ BASELINE_1K = {
     },
 }
 
+# Full 9,500-row Haiku dataset baseline — eval_final_adapter_haiku_reasoning_20260604_124340.json
+# adapter: full_haiku_9500/final_adapter_haiku_reasoning, val: merged/val.jsonl, n_per_task=17
+BASELINE_FULL_HAIKU_9500 = {
+    "label": "full_haiku_9500 haiku_reasoning/5ep max_new=250 n=102",
+    "parse_pct": 86.3,
+    "accuracy_pct": 19.6,
+    "by_task": {
+        "roman":           {"parse_pct": 100.0, "accuracy_pct": 100.0},
+        "cipher_text":     {"parse_pct":  94.1, "accuracy_pct":  17.6},
+        "gravity":         {"parse_pct": 100.0, "accuracy_pct":   0.0},
+        "unit_conversion": {"parse_pct": 100.0, "accuracy_pct":   0.0},
+        "bit_manipulation":{"parse_pct":  64.7, "accuracy_pct":   0.0},
+        "symbol_transform":{"parse_pct":  58.8, "accuracy_pct":   0.0},
+    },
+}
+
 
 def gen_chunked(model, tokenizer, input_ids, max_new=250):
     generated = input_ids
@@ -163,7 +179,7 @@ def main():
         nt = task_total[task]
         bp = 100*task_boxed[task]/nt
         ap = 100*task_correct[task]/nt
-        base = BASELINE_1K["by_task"].get(task, {})
+        base = BASELINE_FULL_HAIKU_9500["by_task"].get(task, {})
         base_str = (f"acc={base.get('accuracy_pct','?')}%"
                     if base else "—")
         delta = ""
@@ -173,9 +189,10 @@ def main():
         print(f"  {task:<20}  {task_boxed[task]:>4}/{nt} ({bp:>5.1f}%)  "
               f"{task_correct[task]:>4}/{nt} ({ap:>5.1f}%)  "
               f"baseline_{base_str}{delta}")
-    print(f"\n  Baseline comparison ({BASELINE_1K['label']}):")
-    print(f"    1k parse={BASELINE_1K['parse_pct']}%  accuracy={BASELINE_1K['accuracy_pct']}%")
-    print(f"    9.5k parse={100*total_boxed/n:.1f}%  accuracy={100*total_correct/n:.1f}%")
+    print(f"\n  Baseline comparison ({BASELINE_FULL_HAIKU_9500['label']}):")
+    print(f"    haiku_9500 parse={BASELINE_FULL_HAIKU_9500['parse_pct']}%  "
+          f"accuracy={BASELINE_FULL_HAIKU_9500['accuracy_pct']}%")
+    print(f"    this run  parse={100*total_boxed/n:.1f}%  accuracy={100*total_correct/n:.1f}%")
     print(sep)
 
     # --- Per-task examples ---
@@ -223,6 +240,7 @@ def main():
             for task in sorted(task_examples)
         },
         "baseline_1k": BASELINE_1K,
+        "baseline_full_haiku_9500": BASELINE_FULL_HAIKU_9500,
     }
 
     with open(out_path, "w") as fp:
