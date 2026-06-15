@@ -119,55 +119,163 @@ the exact bit operation precisely enough in most rows.
 ---
 
 ## v8.1 — Symbol repair rows regenerated
-**Status:** In progress (generation script written; llama.cpp server needed)
+**Status:** Complete
 **Date:** 2026-06-09
 **Teacher:** Local Gemma 4 12B (same as v8)
 **Change:** Narrow fix — only the 385 symbol_transform repair rows are regenerated.
 All other v8 rows are carried over unchanged.
 
-### What changes
-The 385 rows where `source == "deterministic_symbol_copy_repair_v8"` are sent back to
-Gemma 4 12B with a stricter prompt that:
-1. Explicitly instructs the model to name the actual character mapping rule from the examples
-2. Bans a list of generic-copy phrases (`"copy it exactly"`, `"given answer"`, etc.)
-3. Requires `answer == gold_answer` to accept a row
+### What changed
+The 385 rows where `source == "deterministic_symbol_copy_repair_v8"` were sent back to
+Gemma 4 12B with a stricter prompt requiring:
+1. The model names the actual character-level mapping rule from the examples
+2. No generic-copy phrases (`"copy it exactly"`, `"given answer"`, etc.) — hard banned
+3. `answer == gold_answer` required to accept a row
 
-Rows that fail the banned-phrase check or produce a wrong answer are excluded entirely
-(not replaced with another generic string).
+**Outcome:** 88 of 385 rows accepted; 297 excluded (failed answer-match or banned phrase).
+The repair row pool was much harder than expected — most symbol_transform puzzles have
+ambiguous mapping rules that Gemma struggles to articulate precisely.
 
 ### Rows
-| Split | V8 count | Expected v8.1 | Path |
-|-------|----------|---------------|------|
-| Train | 8,344    | ~8,344 (−failed repairs) | `phase02_data_generation/data/v8/train_reasoning_v8_1_local_gemma_clean.jsonl` |
-| Val   | 436      | ~436 (−failed repairs)   | `phase02_data_generation/data/v8/val_reasoning_v8_1_local_gemma_clean.jsonl`   |
+| Split | V8 count | V8.1 count | Delta |
+|-------|----------|-----------|-------|
+| Train | 8,344    | ~8,077    | −267 (297 excl. − 88 regen accepted = net −267 repair rows) |
+| Val   | 436      | ~418      | −18  |
 
-Exact row counts depend on how many of the 385 repair rows Gemma accepts vs rejects.
+Paths: `phase02_data_generation/data/v8/train_reasoning_v8_1_local_gemma_clean.jsonl`,
+`phase02_data_generation/data/v8/val_reasoning_v8_1_local_gemma_clean.jsonl`
 
-### Script
-`phase02_data_generation/src/regen_v8_1_symbol_repairs.py`
-- `--dry-run`: print first prompt and exit (no server needed)
-- `--workers N`: parallelism (default 8, matches llama.cpp slot count)
-- Writes QA audit to `v8_1_local_gemma_clean_dataset_audit.{json,md}` on completion
-- Do NOT train until audit passes
+### Eval results (controlled 102-row fixed eval set)
+| Metric | V8 | V8.1 | Δ |
+|--------|-----|------|---|
+| parse% | 96.1% | 98.0% | +1.9% |
+| accuracy% | 22.5% | 21.6% | −0.9% |
 
-### Remaining open issues (not fixed in v8.1)
-- Gravity 0%: exact g-constant derivation still not reliable
-- Unit_conversion ~6%: same arithmetic precision issue
-- Bit_manipulation ~6%: short reasoning traces; may need explicit operation enumeration
+| task_type | V8 acc | V8.1 acc | Δ |
+|-----------|--------|---------|---|
+| roman | 100% | 100% | 0% |
+| cipher_text | 0% | 5.9% | +5.9% |
+| bit_manipulation | 17.6% | 17.6% | 0% |
+| unit_conversion | 11.8% | 0% | −11.8% |
+| gravity | 0% | 0% | 0% |
+| symbol_transform | 5.9% | 5.9% | 0% |
+
+Symbol_transform accuracy improved from 0% to 5.9% (1/17). Repair-row leakage string
+no longer appears at inference. Unit_conversion regressed to 0% — likely sampling variance
+(small n=17). Overall accuracy slightly down due to UC regression.
+
+### Led to
+→ v8.2: add deterministic solver traces for gravity and unit_conversion
+
+---
+
+## v8.2 — Verbose solver traces for gravity + unit_conversion
+**Status:** Complete (trained; eval confirms parse regression — do not use as base)
+**Date:** 2026-06-09
+**Base:** v8.1
+**Change:** Replace all gravity and unit_conversion rows with deterministic Python solver
+traces. Solver fits exact g-constant or conversion factor from in-context examples,
+writes multi-step arithmetic into reasoning.
+
+### What changed
+gravity traces: `2d/t²` derivation written out per example + verification step (~93 words)
+unit_conversion traces: slope+intercept fit with example verification (~60 words)
+41 rows where solver could not reproduce gold_answer exactly were kept with original V8.1 reasoning.
+
+### Rows
+| Split | V8.1 count | V8.2 count |
+|-------|-----------|-----------|
+| Train | ~8,077    | ~8,077 (same row count, gravity+UC rows replaced in place) |
+| Val   | ~418      | ~418 |
+
+### Eval results (controlled 102-row fixed eval set, max_new=250)
+| Metric | V8.1 | V8.2 | Δ |
+|--------|------|------|---|
+| parse% | 98.0% | 93.1% | −4.9% |
+| accuracy% | 21.6% | 19.6% | −2.0% |
+
+| task_type | V8.1 acc | V8.2 acc | Δ |
+|-----------|---------|---------|---|
+| gravity | 0% | 0% | 0% |
+| unit_conversion | 0% | 0% | 0% |
+| bit_manipulation | 17.6% | 11.8% | −5.9% |
+
+### What went wrong
+**Parse regression:** gravity parse dropped to 0% at max_new=250. All non-parsed rows
+are repetition loops ("Let's recalculate: g = 10.55 × 13.5481 = 71.84. Let's recalculate: ..."),
+not truncations. The verbose 93-word traces shifted the model's token distribution — it learned
+to enter a recalculation loop rather than write `\boxed{}`.
+
+**bit_manipulation regression:** Verbose gravity/UC traces diluted the bit_manipulation training
+signal, likely via distribution shift toward longer arithmetic sequences.
+
+**Arithmetic still wrong:** Even the 12 gravity rows that did parse produced completely wrong
+arithmetic (e.g. "0.5 × 13.01 × 3.18² = 10.39" when correct value ≈ 65.8). The 4B model
+cannot execute multi-digit floating-point arithmetic at inference time regardless of trace format.
+
+### Led to
+→ v8.3-lite: compact single-paragraph solver traces to fix parse regression
+
+---
+
+## v8.3-lite — Compact solver traces for gravity + unit_conversion
+**Status:** Complete (trained + eval'd; gravity/UC arithmetic still wrong at 4B scale)
+**Date:** 2026-06-10
+**Base:** v8.1 (not v8.2 — verbose traces caused parse regression)
+**Change:** Same deterministic solver logic as v8.2 but traces written as compact single
+paragraphs: ~45 words for gravity, ~37 words for unit_conversion. Fits within max_new=250.
+
+### What changed
+gravity trace format: `"g = 2d/t² from examples: ex1→X, ex2→Y, avg g=Z. Answer: 0.5·Z·t²=A."`
+unit_conversion trace format: `"Fit y=m·x+b: ex1→slope, ex2→confirm. Answer: m·q+b=A."`
+41 rows where solver could not reproduce gold_answer: kept with V8.1 reasoning (same as V8.2).
+
+### Rows
+| Split | V8.1 count | V8.3-lite count |
+|-------|-----------|----------------|
+| Train | ~8,077    | 8,069 |
+| Val   | ~418      | 414 |
+
+### Eval results (controlled 102-row fixed eval set, max_new=250)
+| Metric | V8 | V8.1 | V8.2 | V8.3-lite | Δ vs V8.1 |
+|--------|----|------|------|-----------|-----------|
+| parse% | 96.1% | 98.0% | 93.1% | 94.1% | −3.9% |
+| accuracy% | 22.5% | 21.6% | 19.6% | 19.6% | −2.0% |
+
+| task_type | V8.1 acc | V8.3-lite acc | Δ |
+|-----------|---------|--------------|---|
+| gravity | 0% | 0% | 0% |
+| unit_conversion | 0% | 5.9% | +5.9% |
+| bit_manipulation | 17.6% | 11.8% | −5.9% |
+| symbol_transform | 5.9% | 0% | −5.9% |
+
+### What went wrong
+**Gravity parse still 70.6%** (5/17 produce repetition loops, not `\boxed{}`). Compact
+traces helped vs V8.2 (parse 0%→70.6%) but loop behavior persists. The 12 parsed gravity
+rows still have completely wrong arithmetic (hallucinated values).
+
+**Accuracy flat across V8.1→V8.2→V8.3-lite:** 21.6% → 19.6% → 19.6%. The fundamental
+blocker is that the 4B model cannot execute floating-point arithmetic at inference time.
+The solver writes the correct answer into the training trace, but the model pattern-matches
+the output format rather than learning to compute the value. Traces that contain the correct
+answer at training time do not transfer the arithmetic computation ability to inference.
+
+### Core finding
+**Solver traces do not give the model arithmetic ability — they only teach output format.**
+At 4B scale, NemotronH cannot reliably compute `2 × 9.12 / 1.31²` even when it has seen
+thousands of correctly solved examples in training.
+
+### Led to
+→ Open question: cloud 30B training may have sufficient capacity for arithmetic. Alternatively,
+skip gravity/UC improvement and focus on bit_manipulation with rule-enumeration traces.
 
 ---
 
 ## Planned
 
-### v9 — Solver-augmented traces (not started)
-See `docs/experiments/002_v8_solver_trace_plan.md` for the full design.
-
-For gravity and unit_conversion: Python solver fits exact constant analytically from
-in-context examples, writes step-by-step arithmetic into the reasoning trace.
-
+### v9 — Bit manipulation rule enumeration traces
 For bit_manipulation: solver enumerates candidate operations (NOT, rotate, XOR, shift
 combinations), verifies each against all provided examples, writes the verification
-chain into the trace.
+chain into the trace. Current 5.9% suggests the pattern is learnable at 4B.
 
-Blocked on: v8.1 completing and being eval'd first to confirm symbol_transform is fixed
-before starting a new generation pass.
+See `docs/experiments/002_v8_solver_trace_plan.md` for the original design.

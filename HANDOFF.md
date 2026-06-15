@@ -1,80 +1,99 @@
-# Handoff — 2026-06-09T16:15:00Z
+# Handoff — 2026-06-10T00:00:00Z
 
 ## Mode
 Repo (git-grounded)
 
 ## Goal
-Generate a high-quality V8 post-hoc rationale dataset using local Gemma 4 12B, train a NemotronH 4B LoRA adapter on it, evaluate it against the previous full-haiku-9500 baseline, and iterate toward a competitive Kaggle submission. Phase 2 (data generation) and the first V8 local smoke training run (phase 3) are now complete. The next phase is to address failure modes identified in the smoke eval — specifically the symbol_transform repair row leakage — before cloud/30B training.
+Iteratively improve NemotronH 4B LoRA accuracy on a 6-task competition benchmark (roman, bit_manipulation, cipher_text, gravity, unit_conversion, symbol_transform). The current focus is on fixing the two zero-accuracy tasks — gravity and unit_conversion — by replacing LLM-generated reasoning traces with deterministic solver-generated traces, then training and evaluating to see if the model can learn the correct rule-extraction approach.
 
 ## Current Status
-**V8 LoRA smoke training and eval are complete.** The adapter at `phase03_local_smoke/outputs/adapters/v8_local_gemma_clean/final_adapter_haiku_reasoning` was trained for 5 epochs (63.3 min, RTX 5070 Ti) and evaluated on the same 102-sample stratified set used for the haiku baseline. Results: parse 96.1% (+9.8%), accuracy 24.5% (+4.9%). Cipher_text improved +17.7%. Gravity and symbol_transform remain at 0% accuracy. A repair-row reasoning leakage issue was identified in symbol_transform — 355 training rows use a fixed generic reasoning string ("The correct symbol sequence is provided for this post-hoc training trace, so I copy it exactly.") that the model learned to emit at inference time. User has not yet reviewed or approved next steps.
+Three dataset versions and two trained adapters exist. V8.3-lite dataset has been built and audited (PASS) but **not yet trained**. The core finding from V8.2 training is that verbose solver traces caused max_new=250 parse truncation and training distribution shift. V8.3-lite addresses this with compact 45-word (gravity) / 37-word (UC) traces, well within the token budget. Gravity and UC remain at 0% accuracy on all trained adapters so far — the model learns the correct formula structure but cannot execute floating-point arithmetic reliably at 4B scale. The next step is to train V8.3-lite and evaluate whether the shorter traces fix parse while preserving the formula-learning signal.
 
 ## Repo State
-- **Directory:** `/home/hareee234/Dev/kaggle/nemotron-competition-may/nemotron-competition`
-- **Branch:** `feat/v8-data-generation`
+- **Directory:** /home/hareee234/Dev/kaggle/nemotron-competition-may/nemotron-competition
+- **Branch:** feat/v8-data-generation
 - **Git status:**
   ```
-  M phase03_local_smoke/src/eval_chunked_full.py
-  ?? docs/experiments/003_v8_local_gemma_clean.md
-  ?? phase02_data_generation/data/v8/bench_concurrency_report.json
-  ?? phase02_data_generation/data/v8/bench_w{4,16_n512,16_n768}_report.json
-  ?? phase02_data_generation/data/v8/local_gemma_full_report.json
-  ?? phase02_data_generation/data/v8/v8_local_gemma_{clean_,}dataset_audit.{json,md}
-  ?? phase02_data_generation/data/v8/v8_local_gemma_clean_dataset_audit.{json,md}
-  (data JSONL files are gitignored — correct)
+   M phase03_local_smoke/src/eval_chunked_full.py
+  ?? phase02_data_generation/src/build_v8_2_solver_augmented.py
+  ?? phase02_data_generation/src/build_v8_3_solver_lite.py
+  ?? phase02_data_generation/src/regen_v8_1_symbol_repairs.py
+  ?? phase03_local_smoke/src/eval_compare_v8_v8_1.py
+  ?? phase03_local_smoke/src/eval_v8_2_controlled.py
   ```
 - **Recent commits:**
   ```
+  bfa8c15 docs: add dataset version changelog and fix stale REPO_CONVENTIONS
+  7413616 docs: update README to V8 state and tighten gitignore
+  f3ff241 feat: V8 local Gemma clean LoRA — training complete, 24.5% accuracy
   6f604de chore: add Google Drive backup scripts and rclone rules
   29c4367 docs: update HANDOFF with V8 generation plan and smoke test results
-  2c6c1d7 feat: add generate_v8_local_gemma — full V8 dataset generation script
-  5d0230a feat: add local Gemma 4 12B pilots and concurrency benchmark
-  b6715ea feat: add Fireworks provider exploration scripts (pilot, repair, recovery)
   ```
 - **Changed files:**
-  - `phase03_local_smoke/src/eval_chunked_full.py` — added `BASELINE_FULL_HAIKU_9500` constant (parse 86.3%, acc 19.6% per-task numbers), swapped comparison print from BASELINE_1K to BASELINE_FULL_HAIKU_9500, added baseline to saved JSON output
-  - `docs/experiments/003_v8_local_gemma_clean.md` — new experiment record (untracked)
-  - `phase02_data_generation/data/v8/*.json` — benchmark and audit reports (untracked, data dir is gitignored for JSONL but JSON reports are not)
+  - `phase03_local_smoke/src/eval_chunked_full.py` — modified: added V8 local Gemma baseline constants, updated per-task print to show Δ vs both haiku_9500 and V8 baselines, added baseline to saved JSON
+  - `phase02_data_generation/src/build_v8_2_solver_augmented.py` — new: builds V8.2 verbose solver-trace dataset (gravity + UC replaced, ~93-word gravity traces)
+  - `phase02_data_generation/src/build_v8_3_solver_lite.py` — new: builds V8.3-lite compact solver-trace dataset (same solver logic, ~45-word gravity traces, ~37-word UC traces)
+  - `phase02_data_generation/src/regen_v8_1_symbol_repairs.py` — new: regenerated 355 symbol_transform repair rows; 88 accepted, 297 excluded
+  - `phase03_local_smoke/src/eval_compare_v8_v8_1.py` — new: controlled same-eval-set comparison script (V8 vs V8.1, same 102 fixed rows)
+  - `phase03_local_smoke/src/eval_v8_2_controlled.py` — new: 3-way comparison eval (V8 vs V8.1 vs V8.2); reuse for V8.3-lite by updating V82_ADAPTER path and MAX_NEW; has versioned output filenames
 - **Tests / build / lint:** not checked
 
 ## Key Decisions
 | Decision | Rationale | Alternatives Rejected |
 |---|---|---|
-| Use local Gemma 4 12B via raw `/completion` for V8 data | 100% parse, 96% copy on gate, $0 cost | Fireworks DeepSeek V4 Flash (90% good, $7.28/run, persistent cipher/sym failures) |
-| workers=8 for full generation (not 16) | workers=16 benchmark showed -7% throughput regression vs workers=8 (1.59 vs 1.71 rows/s); did not meet 25% improvement threshold | workers=16 (slower due to VRAM/KV cache pressure) |
-| n_predict=512 (not 768) | Smoke test showed 0 truncations at 512; 768 reduces throughput to 1.30 rows/s with no quality gain | n_predict=768 (slower, same quality) |
-| Exclude 596 empty-reasoning rows (not add generic reasoning) | Empty reasoning rows are bad SFT targets; generic reasoning teaches shortcut/copy behavior | Add generic reasoning string |
-| Patch val task_type from staging file | pandas 3.x groupby.apply() drops the groupby key column; staging has the correct task_type for all rows | Regenerate val split (unnecessary) |
-| TARGET_MODULES_V2: Attn+MLP only, no Mamba | Mamba in_proj/out_proj have FP32/BF16 training-inference mismatch causing divergence at position 138 | Including Mamba (V1 config — caused degenerate generation) |
-| Manual training loop (not TRL Trainer) | Unsloth patches Trainer.compute_loss and strips precomputed -100 labels, computing loss on all tokens | TRL SFTTrainer (incorrect masking) |
-| Chunked (no-cache) generation for eval | selective_state_update diverges from training path due to FP32/BF16 Mamba kernel mismatch | Cached generation / model.generate() (broken for NemotronH) |
+| Use V8.1 as base for V8.3-lite (not V8.2) | V8.2 verbose traces caused gravity parse=0% at max_new=250; V8.1 is the clean LLM-reasoned base | Starting from V8.2 |
+| Compact single-paragraph solver traces for V8.3-lite | V8.2 gravity p95=104 words caused truncation before \boxed{}. V8.3-lite gravity=45w, UC=37w fits max_new=250 | Multi-step verbose traces (V8.2 style) |
+| Keep original V8.1 row when solver cannot reproduce gold_answer exactly | Do not insert incorrect reasoning; 41 rows kept | Excluding failing rows, blanking reasoning |
+| Chunked (no-cache) generation for all NemotronH inference | selective_state_update KV cache diverges from training path at inference position ~138 | model.generate() — broken for NemotronH |
+| Attn+MLP LoRA only (no Mamba) | Mamba layers: FP32/BF16 kernel mismatch causes inference divergence | Full-model LoRA including Mamba |
+| Controlled same-eval-set comparison fixed at 102 rows from v8_vs_v8_1_same_eval_ids.json | V8 and V8.1 used different val files, making per-task comparison invalid | Accepting per-run eval as comparable |
 
 ## Constraints and Preferences
-- **Do NOT train LoRA** without explicit user approval per session
-- **Do NOT commit** `.jsonl`, `.json` data files, `.csv` files, or `.claude/` directory
-- **Do NOT use `/v1/chat/completions`** for local Gemma — raw `/completion` only
-- **Do NOT use the sentinel symbol prompt** (`<ANSWER>` variants) — causes tag-bleed regressions
-- **Do NOT push commits** without explicit user instruction
-- **Do NOT start cloud/30B training** without explicit user approval
-- **Do NOT run `rclone sync`** — use `rclone copy` only (sync deletes Drive-only data)
-- Cost hard stop: $10 (applies if Fireworks used as fallback; moot for local runs)
-- Training target modules: Attn+MLP only (Mamba excluded — permanent constraint per CLAUDE.md)
-- Chunked (no-cache) generation is the only correct inference path for NemotronH
+- **Do NOT train LoRA without explicit user approval per session**
+- **Do NOT commit .jsonl, .json data files, .csv files, or .claude/ directory**
+- **Do NOT use /v1/chat/completions for local Gemma — raw /completion endpoint only**
+- **Do NOT push commits without explicit user instruction**
+- **Do NOT start cloud/30B training without explicit user approval**
+- **Do NOT run rclone sync — use rclone copy only**
+- **Do NOT use model.generate() for NemotronH — chunked no-cache only**
+- **Do NOT train on unclean files — always use *_clean.jsonl variants**
+- **Do NOT merge or start cloud training after smoke eval — user review required**
+- Training target modules: Attn+MLP only (q_proj, k_proj, v_proj, o_proj, up_proj, down_proj). Mamba excluded permanently.
+- conda env: `/home/hareee234/miniconda3/envs/nemotron-train/bin/python3`
+- llama.cpp server (Gemma generation): `/home/hareee234/Dev/tools/llamacpp/llama.cpp/build/bin/llama-server`; model at `~/.cache/huggingface/hub/models--unsloth--gemma-4-12b-it-GGUF/.../*.gguf`
 
 ## Do Not Do
-- Do NOT run `generate_v8_local_gemma.py` or any full generation run without explicit approval
-- Do NOT train LoRA on unclean files — always use `*_clean.jsonl` variants
-- Do NOT modify `repair_pilot_30.csv`, `rejected_v8_pool.csv`, or v7 haiku outputs
-- Do NOT use `model.generate()` — broken for NemotronH due to KV cache bug
-- Do NOT merge or start cloud training after smoke eval — user review required
-- Do NOT commit generated JSONL/JSON data outputs or model adapter weights
+- Do not run `model.generate()` for NemotronH — use chunked no-cache loop always
+- Do not train on V8.2 files — verbose traces caused parse regression
+- Do not overwrite V8, V8.1, V8.2, or V8.3-lite adapter directories or data files
+- Do not use rclone sync — copy only
+- Do not commit model artifacts, .jsonl/.json data outputs, or adapter weights
+- Do not start cloud/30B training
+- Do not evaluate with only max_new=250 for V8.3-lite — run both 250 and 500 to confirm parse recovery
 
 ## Open Questions / Risks
-- **Symbol_transform repair row leakage (blocking for next run):** 355 training rows (source=`deterministic_symbol_copy_repair_v8`) use the fixed generic reasoning string "The correct symbol sequence is provided for this post-hoc training trace, so I copy it exactly." The model learned to emit this string at inference time, which provides no puzzle-solving signal. Fix options: (a) exclude these 355 rows from training, (b) regenerate their reasoning using a non-generic string, (c) replace with real reasoning traces. User has not decided.
-- **Gravity 0% accuracy:** Model learns the d=0.5·g·t² formula but consistently extracts the wrong g constant from in-context examples. May require longer max_new at eval (current=250) or multi-step reasoning traces. Not yet tried.
-- **Unit_conversion 1/17:** One success suggests the pattern is learnable. May benefit from same max_new increase. Not yet tried.
-- **Val task_type bug in generate script:** `make_train_val_split()` in `generate_v8_local_gemma.py` uses `df.groupby("task_type").apply(...)` which drops the task_type column in pandas 3.x. Workaround (patch from staging) is in place for existing files, but the generate script itself is not fixed. If V8 is regenerated, the bug will recur.
-- **llama.cpp server is stopped** — was killed to free VRAM for LoRA training. Must be restarted if any further generation or benchmarking is needed.
+- **Will V8.3-lite solve gravity/UC accuracy?** — V8.2 proved the model learns the formula structure but hallucinates arithmetic values (model says `2×9.12/1.31²=9.8444`, correct is 10.6288). Compact traces show correct numerical answer in the reasoning; model may pattern-match rather than compute. Outcome unknown until training.
+- **bit_manipulation regression risk** — V8.2 saw bit_manipulation drop 17.6%→11.8% due to longer gravity/UC traces shifting token distribution. V8.3-lite traces are shorter (45w vs 93w gravity), expected to reduce this risk. Unconfirmed.
+- **unit_conversion sampling variance** — V8 had 11.8% UC accuracy; V8.1/V8.2 both dropped to 0%. V8.3-lite uses same UC solver, compact format. Accuracy outcome uncertain.
+- **Controlled eval source** — The 102 fixed IDs in `phase03_local_smoke/outputs/evals/v8_vs_v8_1_same_eval_ids.json` come from `val_reasoning_v8_1_local_gemma_clean.jsonl`. Continue using that file as eval source for controlled comparisons, even for V8.3-lite, so results are directly comparable across all adapter versions.
 
 ## Next Action
-Address the symbol_transform repair row leakage before the next training run. The 355 repair rows are in `phase02_data_generation/data/v8/local_gemma_symbol_repairs.jsonl` and identifiable by `source == "deterministic_symbol_copy_repair_v8"` in the clean JSONL files. User decision needed: exclude them (simplest — reduces symbol_transform training data from 1,149 to ~794 rows) or replace their reasoning strings with task-specific content. Once decided, create a new `train_reasoning_v8_v2_clean.jsonl` and retrain. Do not train until user approves the fix strategy.
+Train V8.3-lite LoRA (requires explicit user approval per session). Command:
+
+```bash
+nohup /home/hareee234/miniconda3/envs/nemotron-train/bin/python3 \
+    phase03_local_smoke/src/train_lora_v2.py \
+    --train phase02_data_generation/data/v8/train_reasoning_v8_3_solver_lite_clean.jsonl \
+    --val   phase02_data_generation/data/v8/val_reasoning_v8_3_solver_lite_clean.jsonl \
+    --output phase03_local_smoke/outputs/adapters/v8_3_solver_lite_clean \
+    --rank 32 --epochs 5 --lr 2e-4 --batch 1 --accum 4 --max-seq 2048 \
+    --target-type haiku_reasoning \
+    >> phase03_local_smoke/outputs/logs/v8_3_solver_lite_clean_train.log 2>&1 &
+```
+
+After training, run controlled 3-way eval by updating `eval_v8_2_controlled.py`:
+- `V82_ADAPTER` → `phase03_local_smoke/outputs/adapters/v8_3_solver_lite_clean/final_adapter_haiku_reasoning`
+- `MAX_NEW = 250` first, then re-run with `MAX_NEW = 500`
+- Output filenames will auto-version via the `maxnew{MAX_NEW}` suffix already in the script
+
+Target comparison: V8 (96.1%/22.5%), V8.1 (98.0%/21.6%), V8.2 (93.1%/19.6% at max_new=500).
