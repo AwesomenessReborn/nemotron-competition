@@ -39,6 +39,22 @@ BASELINE_1K = {
     },
 }
 
+# V8 local Gemma clean baseline — eval_final_adapter_haiku_reasoning_20260609_155738.json
+# adapter: v8_local_gemma_clean/final_adapter_haiku_reasoning, val: merged/val.jsonl, n_per_task=17
+BASELINE_V8_LOCAL_GEMMA = {
+    "label": "v8_local_gemma_clean haiku_reasoning/5ep max_new=250 n=102",
+    "parse_pct": 96.1,
+    "accuracy_pct": 24.5,
+    "by_task": {
+        "roman":           {"parse_pct": 100.0, "accuracy_pct": 100.0},
+        "cipher_text":     {"parse_pct": 100.0, "accuracy_pct":  35.3},
+        "gravity":         {"parse_pct": 100.0, "accuracy_pct":   0.0},
+        "unit_conversion": {"parse_pct": 100.0, "accuracy_pct":   5.9},
+        "bit_manipulation":{"parse_pct": 100.0, "accuracy_pct":   5.9},
+        "symbol_transform":{"parse_pct":  76.5, "accuracy_pct":   0.0},
+    },
+}
+
 # Full 9,500-row Haiku dataset baseline — eval_final_adapter_haiku_reasoning_20260604_124340.json
 # adapter: full_haiku_9500/final_adapter_haiku_reasoning, val: merged/val.jsonl, n_per_task=17
 BASELINE_FULL_HAIKU_9500 = {
@@ -174,25 +190,26 @@ def main():
     print(f"  accuracy   : {total_correct}/{n}  ({100*total_correct/n:.1f}%)")
     print(f"  elapsed    : {elapsed_total/60:.1f} min")
     print(f"\n  Per-task breakdown:")
-    print(f"  {'task':<20}  {'parse':>12}  {'accuracy':>12}  vs_baseline")
+    print(f"  {'task':<20}  {'parse':>12}  {'accuracy':>12}  Δvs_haiku9500  Δvs_v8gemma")
     for task in sorted(task_total):
         nt = task_total[task]
         bp = 100*task_boxed[task]/nt
         ap = 100*task_correct[task]/nt
-        base = BASELINE_FULL_HAIKU_9500["by_task"].get(task, {})
-        base_str = (f"acc={base.get('accuracy_pct','?')}%"
-                    if base else "—")
-        delta = ""
-        if "accuracy_pct" in base:
-            d = ap - base["accuracy_pct"]
-            delta = f"  (Δ={d:+.0f}%)"
+        b1 = BASELINE_FULL_HAIKU_9500["by_task"].get(task, {})
+        b2 = BASELINE_V8_LOCAL_GEMMA["by_task"].get(task, {})
+        d1 = f"{ap - b1['accuracy_pct']:+.0f}%" if "accuracy_pct" in b1 else "—"
+        d2 = f"{ap - b2['accuracy_pct']:+.0f}%" if "accuracy_pct" in b2 else "—"
         print(f"  {task:<20}  {task_boxed[task]:>4}/{nt} ({bp:>5.1f}%)  "
               f"{task_correct[task]:>4}/{nt} ({ap:>5.1f}%)  "
-              f"baseline_{base_str}{delta}")
-    print(f"\n  Baseline comparison ({BASELINE_FULL_HAIKU_9500['label']}):")
-    print(f"    haiku_9500 parse={BASELINE_FULL_HAIKU_9500['parse_pct']}%  "
+              f"{d1:>13}  {d2:>11}")
+    print(f"\n  Baseline comparison:")
+    print(f"    haiku_9500  parse={BASELINE_FULL_HAIKU_9500['parse_pct']}%  "
           f"accuracy={BASELINE_FULL_HAIKU_9500['accuracy_pct']}%")
-    print(f"    this run  parse={100*total_boxed/n:.1f}%  accuracy={100*total_correct/n:.1f}%")
+    print(f"    v8_gemma    parse={BASELINE_V8_LOCAL_GEMMA['parse_pct']}%  "
+          f"accuracy={BASELINE_V8_LOCAL_GEMMA['accuracy_pct']}%")
+    print(f"    this run    parse={100*total_boxed/n:.1f}%  "
+          f"accuracy={100*total_correct/n:.1f}%  "
+          f"(Δ vs v8_gemma: acc={100*total_correct/n - BASELINE_V8_LOCAL_GEMMA['accuracy_pct']:+.1f}%)")
     print(sep)
 
     # --- Per-task examples ---
@@ -241,6 +258,7 @@ def main():
         },
         "baseline_1k": BASELINE_1K,
         "baseline_full_haiku_9500": BASELINE_FULL_HAIKU_9500,
+        "baseline_v8_local_gemma": BASELINE_V8_LOCAL_GEMMA,
     }
 
     with open(out_path, "w") as fp:
